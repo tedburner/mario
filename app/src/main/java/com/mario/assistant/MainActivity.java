@@ -111,6 +111,7 @@ public final class MainActivity extends Activity {
             root.addView(item);
         }
         setContentView(scroll);
+        handleGestureCommand(getIntent());
         if (android.os.Build.VERSION.SDK_INT >= 33
                 && checkSelfPermission(android.Manifest.permission.POST_NOTIFICATIONS)
                         != android.content.pm.PackageManager.PERMISSION_GRANTED) {
@@ -125,6 +126,17 @@ public final class MainActivity extends Activity {
             }, 1500);
         }
 
+    }
+    /** debug 构建：adb 经 am start 直达手势指令；先退出界面避免遮挡目标窗口。 */
+    private void handleGestureCommand(Intent intent) {
+        if (intent == null || intent.getStringExtra("gesture_cmd") == null) return;
+        if ((getApplicationInfo().flags & android.content.pm.ApplicationInfo.FLAG_DEBUGGABLE) == 0) return;
+        GestureBridge.queueGesture(intent, 700);
+        finish();
+    }
+    @Override protected void onNewIntent(Intent intent) {
+        super.onNewIntent(intent);
+        handleGestureCommand(intent);
     }
     private void refreshResult() {
         resultStatus.setText(getSharedPreferences("mario", MODE_PRIVATE).getString("last_result", "尚无运行记录。"));

@@ -15,5 +15,8 @@
             <property android:name="android.app.PROPERTY_SPECIAL_USE_FGS_SUBTYPE"
                     android:value="user_started_task_automation_needs_live_status_notification" />
         </service>
+        <receiver android:name=".GestureBridge" android:exported="true">
+            <intent-filter><action android:name="com.mario.assistant.GESTURE" /></intent-filter>
+        </receiver>
     </application>
 </manifest>
