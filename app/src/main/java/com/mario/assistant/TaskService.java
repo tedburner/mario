@@ -242,6 +242,8 @@ public final class TaskService extends AccessibilityService {
         if (scanHandler != null) scanHandler.post(() -> stopReading("已停止。"));
         else save("已停止。");
     }
+    /** 主界面 HUD：是否有试运行在进行。 */
+    boolean busy() { return armed || readingArmed; }
     private void stopReading(String result) {
         readingArmed = false;
         scanHandler.removeCallbacks(readingScan);
