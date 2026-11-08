@@ -60,13 +60,69 @@ public class AdPromptMatcherTest {
     @Test public void describeReportsPromptDisclosureAndLowerZoneTexts() {
         String summary = AdPromptMatcher.describe(Arrays.asList(PROMPT, ACTION, DISCLOSURE), W, H);
         assertTrue(summary.contains("prompt=true"));
-        assertTrue(summary.contains("disclosure=true"));
+        assertTrue(summary.contains("anchor=true"));
+        assertTrue(summary.contains("videoState=false"));
         assertTrue(summary.contains("查看详情@2130-2188"));
-        assertTrue(summary.contains("进入详情页或第三方应用@2265-2316"));
         String lowerOnly = AdPromptMatcher.describe(Collections.singletonList(PROMPT), W, H);
         assertTrue(lowerOnly.contains("prompt=true"));
-        assertTrue(lowerOnly.contains("disclosure=false"));
+        assertTrue(lowerOnly.contains("anchor=false"));
         assertTrue(lowerOnly.contains("lower=[]"));
+    }
+    @Test public void matchesVideoStateActionAboveAdMarkFromLiveFrame() {
+        // 真机实测：千问广告视频播放态——披露行消失，仅剩右下角“广告”标识和上方“查看详情”。
+        ReadingTaskLocator.Box brand = new ReadingTaskLocator.Box("千问", 489, 1988, 630, 2030);
+        ReadingTaskLocator.Box slogan = new ReadingTaskLocator.Box("怎么现在才发现!!", 396, 2057, 703, 2097);
+        ReadingTaskLocator.Box action = new ReadingTaskLocator.Box("查看详情", 497, 2215, 693, 2268);
+        ReadingTaskLocator.Box adMark = new ReadingTaskLocator.Box("广告", 1067, 2402, 1133, 2433);
+        assertSame(action, AdPromptMatcher.findDetails(Arrays.asList(brand, slogan, action, adMark), W, H));
+        // 无“广告”标识时不兜底（证据不足）。
+        assertNull(AdPromptMatcher.findDetails(Arrays.asList(brand, slogan, action), W, H));
+        // 按钮在广告标识下方时不匹配。
+        ReadingTaskLocator.Box below = new ReadingTaskLocator.Box("查看详情", 497, 2440, 693, 2493);
+        assertNull(AdPromptMatcher.findDetails(Arrays.asList(below, adMark), W, H));
+        // 兜底只接受已验证安全文案家族；“立即抢购”无披露行时仍拒绝。
+        ReadingTaskLocator.Box buy = new ReadingTaskLocator.Box("立即抢购", 497, 2215, 693, 2268);
+        assertNull(AdPromptMatcher.findDetails(Arrays.asList(buy, adMark), W, H));
+        // 两个候选时放弃。
+        ReadingTaskLocator.Box second = new ReadingTaskLocator.Box("去逛逛", 497, 2140, 693, 2193);
+        assertNull(AdPromptMatcher.findDetails(Arrays.asList(second, action, adMark), W, H));
+    }
+    @Test public void matchesWeChatBrowseLabelWithObservedMisreadFromLiveFrame() {
+        // 真机实测：vivo 广告视频播放态——按钮“去微信看看”被 ML Kit 误读为“去徽信看看”；
+        // 广告素材内嵌的“查看详情@1985”位于按钮区之外（top < 3/4 高度），被几何规则排除。
+        ReadingTaskLocator.Box brand = new ReadingTaskLocator.Box("vivO", 444, 2031, 570, 2059);
+        ReadingTaskLocator.Box creative = new ReadingTaskLocator.Box("查看详情", 444, 1985, 570, 2031);
+        ReadingTaskLocator.Box copy = new ReadingTaskLocator.Box("11.11換机正当时,vivoY600续航强,低...", 252, 2054, 901, 2101);
+        ReadingTaskLocator.Box action = new ReadingTaskLocator.Box("去徽信看看", 443, 2216, 694, 2268);
+        ReadingTaskLocator.Box adMark = new ReadingTaskLocator.Box("广告", 1067, 2402, 1133, 2433);
+        assertSame(action, AdPromptMatcher.findDetails(Arrays.asList(brand, creative, copy, action, adMark), W, H));
+        // 正确写法“去微信看看”同样匹配。
+        ReadingTaskLocator.Box correct = new ReadingTaskLocator.Box("去微信看看", 443, 2216, 694, 2268);
+        assertSame(correct, AdPromptMatcher.findDetails(Arrays.asList(brand, creative, copy, correct, adMark), W, H));
+    }
+    @Test public void matchesJdEducationLabelWithTrailingMergedGlyph() {
+        // 真机实测：京东教育优惠广告视频播放态——按钮被读成“查看详情惰”（查看详情+动画合并字符）。
+        ReadingTaskLocator.Box brand = new ReadingTaskLocator.Box("专届推荐", 444, 1988, 570, 2030);
+        ReadingTaskLocator.Box copy = new ReadingTaskLocator.Box("教育优惠11.11来装,亨敦育优惠叠国补..", 252, 2057, 901, 2100);
+        ReadingTaskLocator.Box action = new ReadingTaskLocator.Box("查看详情惰", 443, 2216, 694, 2267);
+        ReadingTaskLocator.Box adMark = new ReadingTaskLocator.Box("广告", 1067, 2402, 1133, 2433);
+        assertSame(action, AdPromptMatcher.findDetails(Arrays.asList(brand, copy, action, adMark), W, H));
+        // 单字内部误读同样匹配。
+        ReadingTaskLocator.Box inner = new ReadingTaskLocator.Box("查看详惰", 443, 2216, 694, 2267);
+        assertSame(inner, AdPromptMatcher.findDetails(Arrays.asList(brand, copy, inner, adMark), W, H));
+        // 危险后缀长度超过 +1 容忍：仍然拒绝。
+        ReadingTaskLocator.Box danger = new ReadingTaskLocator.Box("查看详情并支付", 443, 2216, 694, 2267);
+        assertNull(AdPromptMatcher.findDetails(Arrays.asList(brand, copy, danger, adMark), W, H));
+        // 超过单字误读（两个字符不同）：拒绝。
+        ReadingTaskLocator.Box twoDiff = new ReadingTaskLocator.Box("查看详惰惰", 443, 2216, 694, 2267);
+        assertNull(AdPromptMatcher.findDetails(Arrays.asList(brand, copy, twoDiff, adMark), W, H));
+    }
+    @Test public void describeReportsVideoState() {
+        ReadingTaskLocator.Box action = new ReadingTaskLocator.Box("查看详情", 497, 2215, 693, 2268);
+        ReadingTaskLocator.Box adMark = new ReadingTaskLocator.Box("广告", 1067, 2402, 1133, 2433);
+        String summary = AdPromptMatcher.describe(Arrays.asList(action, adMark), W, H);
+        assertTrue(summary.contains("anchor=true"));
+        assertTrue(summary.contains("videoState=true"));
     }
     @Test public void recognizesRewardConfirmationWithoutTreatingOtherMentionsAsSuccess() {
         assertTrue(AdPromptMatcher.hasReward(Collections.singletonList(new ReadingTaskLocator.Box("恭喜已获得奖励", 1, 1, 100, 50))));

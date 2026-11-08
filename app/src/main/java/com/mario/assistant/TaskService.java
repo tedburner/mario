@@ -58,6 +58,17 @@ public final class TaskService extends AccessibilityService {
     private ReadingTaskLocator.Box priorTabTarget;
     private int emptyScans;
     private int scrollAttempts;
+    private long readingUnlockDeadline;
+    private int unlockAttempts;
+    private boolean signinTask;
+    private int signinFrames;
+    private String currentTaskTitle;
+    private boolean currentSignin;
+    private int returnedFrames;
+    private int readingPhase; // stage 5 内：0=找书架第一本书，1=书中阅读
+    private long readingStartedAt;
+    private ReadingTaskLocator.Box priorBookTarget;
+    private int bookScans;
     private int priorWidth, priorHeight;
     private TextRecognizer recognizer;
     private static final String CHANNEL_STATUS = "run_status";
@@ -129,6 +140,23 @@ public final class TaskService extends AccessibilityService {
                 }
             } else if (readingStage == 4 && now >= adTransitionDeadline) {
                 stopReading("未能确认返回后的奖励，请手动检查。");
+            } else if (readingStage == 5) {
+                // 阅读解锁两阶段：找到书架第一本书 → 书中阅读 1 分钟 → 返回并重走导航
+                if (now >= readingUnlockDeadline) {
+                    stopReading("阅读解锁未完成，请手动检查限时任务状态。");
+                } else if (readingPhase == 1) {
+                    if (now - readingStartedAt >= 120000 && !readingBusy) {
+                        if (performGlobalAction(GLOBAL_ACTION_BACK)) {
+                            readingStage = 0;
+                            readingPhase = 0;
+                            save("阅读时间已满，已退出书籍，将重新进入 我-福利中心 继续任务。");
+                        } else {
+                            stopReading("无法执行返回操作，请手动返回福利中心。");
+                        }
+                    }
+                } else if (!readingBusy && root != null && "com.qidian.QDReader".equals(pkg)) {
+                    inspectReadingScreen(); // OCR 驱动：任务行可见性 / 书架第一本书定位
+                }
             } else if (!readingBusy && root != null && "com.qidian.QDReader".equals(pkg)) {
                 if (readingStage != 0 || !openReadingCenterIfNeeded(root)) inspectReadingScreen();
             }
@@ -173,7 +201,10 @@ public final class TaskService extends AccessibilityService {
     }
     void inspectReading() {
         startRunForeground();
-        finish("准备识别起点福利中心。");
+        // 只停森林流程；前台服务必须保持（识别流程自身的冻结豁免依赖它）
+        armed = false;
+        handler.removeCallbacks(scan);
+        save("准备识别起点福利中心。");
         if (scanHandler == null) { save("识别线程未就绪，请稍后重试。"); return; }
         scanHandler.post(() -> {
             readingNavigationAttempted = false;
@@ -187,6 +218,15 @@ public final class TaskService extends AccessibilityService {
             priorTabTarget = null;
             emptyScans = 0;
             scrollAttempts = 0;
+            unlockAttempts = 0;
+            signinTask = false;
+            signinFrames = 0;
+            currentTaskTitle = null;
+            currentSignin = false;
+            returnedFrames = 0;
+            readingPhase = 0;
+            priorBookTarget = null;
+            bookScans = 0;
             readingArmed = true;
             readingBusy = false;
             lastForegroundPkg = null;
@@ -255,6 +295,7 @@ public final class TaskService extends AccessibilityService {
             case 2: return "广告点击后未确认详情页打开，已超时停止。";
             case 3: return "广告停留期间未能确认返回时机，已超时停止。";
             case 4: return "返回起点后未确认奖励提示，已超时停止。";
+            case 5: return "阅读解锁未完成，已超时停止。";
             default: return "未找到可执行的广告任务入口，已超时停止。";
         }
     }
@@ -332,7 +373,37 @@ public final class TaskService extends AccessibilityService {
             handleStageTwoOcr(boxes, image);
             return;
         }
+        if (readingStage == 5) {
+            handleReadingUnlockOcr(boxes, image, capturedAt);
+            return;
+        }
         if (readingStage == 4) {
+            if (signinTask) {
+                // 签到任务：返回起点且连续两帧无奖励弹窗时视为完成；携程为最后一个任务，完成后收尾。
+                if (AdPromptMatcher.hasReward(boxes)) {
+                    signinFrames = 0;
+                    return;
+                }
+                if (++signinFrames >= 2) {
+                    if (currentSignin) {
+                        readingArmed = false;
+                        scanHandler.removeCallbacks(readingScan);
+                        stopRunForeground();
+                        save("「去携程签到领积分」已完成，全部任务结束；请在福利中心核对各项奖励。");
+                    } else {
+                        nextTask("「" + currentTaskTitle + "」已返回起点；");
+                    }
+                }
+                return;
+            }
+            // 广告任务：返回福利中心连续两帧即视为本轮流程结束，继续下一个任务。
+            if (ReadingTaskLocator.find(boxes, image.getWidth()) != null) {
+                if (++returnedFrames >= 2) {
+                    nextTask("「" + currentTaskTitle + "」已返回福利中心；");
+                }
+                return;
+            }
+            returnedFrames = 0;
             inspectReward(boxes, current, image, capturedAt);
             return;
         }
@@ -340,8 +411,8 @@ public final class TaskService extends AccessibilityService {
         ReadingTaskLocator.Row row = ReadingTaskLocator.find(boxes, image.getWidth());
         if (row == null) {
             priorReadingTarget = null;
-            Log.i("MarioAdDiag", ReadingTaskLocator.describe(boxes));
-            boolean onWelfarePage = hasOcrText(boxes, "福利中心");
+            Log.i("MarioAdDiag", ReadingTaskLocator.describe(boxes, image.getHeight()));
+            boolean onWelfarePage = readingNavigationAttempted || hasOcrText(boxes, "福利中心");
             if (onWelfarePage) {
                 emptyScans++;
                 if (emptyScans >= 2 && scrollAttempts < 6) {
@@ -363,31 +434,86 @@ public final class TaskService extends AccessibilityService {
             priorWidth = image.getWidth(); priorHeight = image.getHeight();
             return;
         }
-        readingStage = 1;
         priorReadingTarget = null;
+        if (row.signin) {
+            // 签到类任务：点击后直接等待落地页（携程/内嵌页），无广告底部操作区阶段。
+            signinTask = true;
+            signinFrames = 0;
+            currentTaskTitle = row.title;
+            currentSignin = true;
+            adFlow.detailsRequested();
+            readingStage = 2;
+            adSheetFrames = 0;
+            adTransitionDeadline = SystemClock.elapsedRealtime() + 30000;
+            tap(row.button.left, row.button.top, row.button.right, row.button.bottom,
+                    "已点击「" + row.title + "」，等待签到页面。", "签到入口点击被中断。");
+            return;
+        }
+        signinTask = false;
+        currentSignin = false;
+        if (row.goRead) {
+            currentTaskTitle = "限时广告加点";
+            if (unlockAttempts >= 2) {
+                readingArmed = false;
+                save("阅读解锁未生效（已尝试 " + unlockAttempts + " 次），请手动完成后重试。");
+                return;
+            }
+            unlockAttempts++;
+            readingStage = 5;
+            readingPhase = 0;
+            priorBookTarget = null;
+            bookScans = 0;
+            readingUnlockDeadline = SystemClock.elapsedRealtime() + 200000;
+            tap(row.button.left, row.button.top, row.button.right, row.button.bottom,
+                    "已点击「阅读1分钟」，将打开书架第一本书阅读 2 分钟。", "阅读入口点击被中断。");
+            return;
+        }
+        readingStage = 1;
+        currentTaskTitle = row.title;
         tap(row.button.left, row.button.top, row.button.right, row.button.bottom,
                 "已点击「" + row.title + "」任务入口，等待广告页面。", "任务入口点击被中断。");
+    }
+    /** 单个任务流程结束：回到 stage 0 继续下一个任务；滚动预算与各阶段状态重置，截止时间顺延。 */
+    private void nextTask(String reason) {
+        readingStage = 0;
+        signinTask = false;
+        signinFrames = 0;
+        returnedFrames = 0;
+        adSheetFrames = 0;
+        unlockAttempts = 0;
+        readingPhase = 0;
+        priorReadingTarget = null;
+        priorAdTarget = null;
+        priorAdAnchor = null;
+        priorTabTarget = null;
+        scrollAttempts = 0;
+        emptyScans = 0;
+        readingDeadline = SystemClock.elapsedRealtime() + 300000;
+        save(reason + "继续查找下一个任务。");
     }
     /** 福利中心之外且尚未进入任务页时，点击底部唯一的“我的”标签实现全自动进入我的页面。 */
     private void attemptTabNavigation(List<ReadingTaskLocator.Box> boxes, Bitmap image, long capturedAt) {
         int width = image.getWidth(), height = image.getHeight();
         if (width <= 0 || height <= 0 || readingNavigationAttempted) return;
+        boolean markerVisible = false;
+        int candidates = 0;
+        ReadingTaskLocator.Box tab = null;
         for (ReadingTaskLocator.Box box : boxes) {
             if (box == null || box.text == null) continue;
             String text = box.text.replace(" ", "");
-            if (text.equals("我的账户") || text.equals("福利中心")) return;
-        }
-        ReadingTaskLocator.Box tab = null;
-        for (ReadingTaskLocator.Box box : boxes) {
-            if (box == null || !"我的".equals(box.text)) continue;
+            if (text.equals("我的账户") || text.equals("福利中心")) markerVisible = true;
+            if (!"我".equals(box.text)) continue;
             if (box.left < 0 || box.right > width || box.top < height * 88 / 100 || box.top >= box.bottom) continue;
-            if (tab != null) return;
+            candidates++;
             tab = box;
         }
-        if (tab == null) { priorTabTarget = null; return; }
+        boolean stableNow = tab != null && VisualTargetGuard.stable(priorTabTarget, tab, width, height);
+        Log.i("MarioAdDiag", "tabnav attempted=" + readingNavigationAttempted + " marker=" + markerVisible
+                + " candidates=" + candidates + " tab=" + boxSummary(tab) + " prior=" + boxSummary(priorTabTarget)
+                + " stable=" + stableNow);
+        if (markerVisible || candidates != 1) { priorTabTarget = null; return; }
         if (!ReadingNavigationPolicy.mayTapMyTab(1, true)) return;
-        if (!VisualTargetGuard.stable(priorTabTarget, tab, width, height)
-                || SystemClock.elapsedRealtime() - capturedAt > 5000) {
+        if (!stableNow || SystemClock.elapsedRealtime() - capturedAt > 5000) {
             priorTabTarget = tab;
             return;
         }
@@ -429,6 +555,61 @@ public final class TaskService extends AccessibilityService {
         }
         return false;
     }
+    /** stage 5 phase 0：任务行可见=去阅读没生效；否则在书架页定位第一本书（双帧稳定后点击）。 */
+    private void handleReadingUnlockOcr(List<ReadingTaskLocator.Box> boxes, Bitmap image, long capturedAt) {
+        long now = SystemClock.elapsedRealtime();
+        long sinceEntry = now - (readingUnlockDeadline - 150000);
+        if (readingPhase == 1) return;
+        if (sinceEntry > 10000 && ReadingTaskLocator.find(boxes, image.getWidth()) != null) {
+            readingStage = 0;
+            readingPhase = 0;
+            save("阅读页未打开，重新查找任务行。");
+            return;
+        }
+        if (sinceEntry < 5000) return;
+        ReadingTaskLocator.Box book = ReadingTaskLocator.firstBook(boxes, image.getHeight());
+        StringBuilder content = new StringBuilder();
+        for (ReadingTaskLocator.Box box : boxes) {
+            if (box == null || box.text == null || box.text.length() < 2) continue;
+            int h = image.getHeight();
+            if (box.top < h * 12 / 100 || box.bottom > h * 85 / 100) continue;
+            if (content.length() > 0) content.append(' ');
+            content.append(box.text).append('@').append(box.top).append('-').append(box.bottom);
+        }
+        Log.i("MarioAdDiag", "bookshelf book=" + (book == null ? "null" : boxSummary(book))
+                + " content=[" + content + "]");
+        if (book == null) {
+            priorBookTarget = null;
+            if (++bookScans >= 2 && hasOcrText(boxes, "书架")) {
+                // 书架内容识别不到但标签可见：点“书架”标签回到书架页
+                ReadingTaskLocator.Box tab = null;
+                for (ReadingTaskLocator.Box box : boxes) {
+                    if (box == null || !"书架".equals(box.text) || box.top < image.getHeight() * 88 / 100) continue;
+                    if (tab != null) { tab = null; break; }
+                    tab = box;
+                }
+                if (tab != null && VisualTargetGuard.stable(priorBookTarget, tab, image.getWidth(), image.getHeight())) {
+                    priorBookTarget = null;
+                    tap(tab.left, tab.top, tab.right, tab.bottom,
+                            "已点击「书架」标签，查找第一本书。", "书架标签点击被中断。");
+                } else if (tab != null) {
+                    priorBookTarget = tab;
+                }
+            }
+            return;
+        }
+        bookScans = 0;
+        if (!VisualTargetGuard.stable(priorBookTarget, book, image.getWidth(), image.getHeight())
+                || now - capturedAt > 5000) {
+            priorBookTarget = book;
+            return;
+        }
+        priorBookTarget = null;
+        readingPhase = 1;
+        readingStartedAt = now;
+        tap(book.left, book.top, book.right, book.bottom,
+                "已打开书架第一本书，开始阅读 1 分钟。", "打开书籍被中断。");
+    }
     /** stage 2 且前台仍在起点：广告底部操作区连续两帧消失即确认起点内落地页；若已回到福利中心则如实停止。 */
     private void handleStageTwoOcr(List<ReadingTaskLocator.Box> boxes, Bitmap image) {
         boolean sheetPresent = AdPromptMatcher.findDisclosure(boxes) != null
@@ -450,7 +631,7 @@ public final class TaskService extends AccessibilityService {
             return;
         }
         int width = image.getWidth(), height = image.getHeight();
-        ReadingTaskLocator.Box anchor = AdPromptMatcher.findDisclosure(boxes);
+        ReadingTaskLocator.Box anchor = AdPromptMatcher.findStabilityAnchor(boxes, width, height);
         ReadingTaskLocator.Box target = AdPromptMatcher.findDetails(boxes, width, height);
         Log.i("MarioAdDiag", "target=" + (target != null) + " anchor=" + (anchor != null)
                 + " boxes=" + boxes.size() + " age=" + (SystemClock.elapsedRealtime() - capturedAt)
@@ -492,10 +673,9 @@ public final class TaskService extends AccessibilityService {
         if (close.size() != 1 || !close.get(0).isVisibleToUser()) return;
         Rect rect = new Rect(); close.get(0).getBoundsInScreen(rect);
         if (rect.isEmpty() || rect.left < image.getWidth() * 3 / 4 || rect.bottom > image.getHeight() / 4) return;
-        readingArmed = false;
-        scanHandler.removeCallbacks(readingScan);
+        nextTask("广告显示已获得奖励，已尝试关闭；");
         tap(rect.left, rect.top, rect.right, rect.bottom,
-                "广告显示已获得奖励，已尝试关闭；请在福利中心核对。", "关闭广告被中断，请手动处理。");
+                "广告显示已获得奖励，已尝试关闭；继续下一个任务。", "关闭广告被中断，请手动处理。");
     }
     private void tap(int left, int top, int right, int bottom, String success, String failure) {
         Path path = new Path(); path.moveTo((left + right) / 2f, (top + bottom) / 2f);

@@ -1,10 +1,13 @@
 package com.mario.assistant;
 
 final class VisualTargetGuard {
-    /** 福利中心入口：同文案且逐边一致（该页面无动画干扰，用紧容差）。 */
+    /** 福利中心入口/底部标签：同文案且中心点接近（实测标签框边缘抖动大，逐边比对凑不齐双帧）。 */
     static boolean stable(ReadingTaskLocator.Box first, ReadingTaskLocator.Box second, int width, int height) {
         if (first == null || second == null || first.text == null || !first.text.equals(second.text)) return false;
-        return tightPlace(first, second, width, height);
+        if (!validPlace(first, width, height) || !validPlace(second, width, height)) return false;
+        int tolerance = Math.max(16, width / 8);
+        return Math.abs((first.left + first.right) / 2 - (second.left + second.right) / 2) <= tolerance
+                && Math.abs((first.top + first.bottom) / 2 - (second.top + second.bottom) / 2) <= tolerance;
     }
 
     /**

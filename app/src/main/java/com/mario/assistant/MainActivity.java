@@ -40,6 +40,27 @@ public final class MainActivity extends Activity {
         permission.setText("打开无障碍设置");
         permission.setOnClickListener(v -> startActivity(new Intent(Settings.ACTION_ACCESSIBILITY_SETTINGS)));
         root.addView(permission);
+        TextView checklist = new TextView(this);
+        checklist.setText("运行前检查（HyperOS 防冻结，重要）：\n"
+                + "1. 允许通知权限——通知栏可见运行状态\n"
+                + "2. 省电策略设为“无限制”：设置 → 应用管理 →\n"
+                + "    Mario 任务助手 → 省电策略 → 无限制\n"
+                + "3. 最近任务里长按本应用卡片 → 点“锁定”🔒\n"
+                + "4. 试运行期间不要划掉本应用\n"
+                + "5. 点击广告跳转后系统可能短暂冻结本应用\n"
+                + "    （约 1–2 分钟），期间请耐心等待，解冻后自动\n"
+                + "    继续；期间触屏会导致流程如实停止");
+        checklist.setTextSize(14);
+        checklist.setPadding(0, pad, 0, pad / 2);
+        root.addView(checklist);
+        Button appInfo = new Button(this);
+        appInfo.setText("打开本应用详情（省电策略/自启动）");
+        appInfo.setOnClickListener(v -> {
+            Intent detail = new Intent(Settings.ACTION_APPLICATION_DETAILS_SETTINGS);
+            detail.setData(android.net.Uri.fromParts("package", getPackageName(), null));
+            startActivity(detail);
+        });
+        root.addView(appInfo);
         Button claim = new Button(this);
         claim.setText("试运行：领取森林浏览任务");
         claim.setOnClickListener(v -> {
@@ -78,9 +99,13 @@ public final class MainActivity extends Activity {
         resultStatus.setTextSize(16);
         resultStatus.setPadding(0, pad, 0, pad);
         root.addView(resultStatus);
-        for (String task : new String[]{"蚂蚁森林", "蚂蚁庄园", "芭芭农场", "起点读书"}) {
+        for (String[] task : new String[][]{
+                {"蚂蚁森林", "领取已浏览任务 · 已真机验证"},
+                {"蚂蚁庄园", "待适配"},
+                {"芭芭农场", "待适配"},
+                {"起点读书", "广告任务全自动试运行 · 返回验证中"}}) {
             TextView item = new TextView(this);
-            item.setText(task + "  ·  待适配");
+            item.setText(task[0] + "  ·  " + task[1]);
             item.setTextSize(17);
             item.setPadding(0, pad, 0, pad / 2);
             root.addView(item);
