@@ -1,4 +1,6 @@
-package com.mario.assistant;
+package com.mario.assistant.domain.welfare;
+
+import com.mario.assistant.domain.model.TextBlock;
 
 import java.util.List;
 
@@ -9,22 +11,22 @@ import java.util.List;
  * 出现，点击后本项目只在落地页停留计时、不做任何点击，不会产生订单；只拒绝会直接安装
  * 应用的按钮。
  */
-final class AdPromptMatcher {
+public final class AdPromptMatcher {
     private static final String[] DENIED_LABELS = {"下载", "安装"};
 
-    static ReadingTaskLocator.Box findDetails(List<ReadingTaskLocator.Box> boxes, int width, int height) {
+    public static TextBlock findDetails(List<TextBlock> boxes, int width, int height) {
         if (width <= 0 || height <= 0) return null;
-        ReadingTaskLocator.Box disclosure = findDisclosure(boxes);
+        TextBlock disclosure = findDisclosure(boxes);
         if (disclosure != null) {
-            ReadingTaskLocator.Box action = findActionAbove(boxes, disclosure, width, height);
+            TextBlock action = findActionAbove(boxes, disclosure, width, height);
             if (action != null) return action;
         }
         return findVideoStateAction(boxes, width, height);
     }
 
-    static ReadingTaskLocator.Box findDisclosure(List<ReadingTaskLocator.Box> boxes) {
-        ReadingTaskLocator.Box found = null;
-        for (ReadingTaskLocator.Box box : boxes) {
+    public static TextBlock findDisclosure(List<TextBlock> boxes) {
+        TextBlock found = null;
+        for (TextBlock box : boxes) {
             if (box == null || box.text == null) continue;
             if (!isDisclosureLine(box.text.replace(" ", ""))) continue;
             if (found != null) return null;
@@ -34,16 +36,16 @@ final class AdPromptMatcher {
     }
 
     /** 跨帧稳定性的锚点：优先披露行；视频播放态用“广告”平台标识证明页面未变。 */
-    static ReadingTaskLocator.Box findStabilityAnchor(List<ReadingTaskLocator.Box> boxes, int width, int height) {
+    public static TextBlock findStabilityAnchor(List<TextBlock> boxes, int width, int height) {
         if (width <= 0 || height <= 0) return null;
-        ReadingTaskLocator.Box disclosure = findDisclosure(boxes);
+        TextBlock disclosure = findDisclosure(boxes);
         if (disclosure != null) return disclosure;
         return findAdMark(boxes, height);
     }
 
-    private static ReadingTaskLocator.Box findAdMark(List<ReadingTaskLocator.Box> boxes, int height) {
-        ReadingTaskLocator.Box found = null;
-        for (ReadingTaskLocator.Box box : boxes) {
+    private static TextBlock findAdMark(List<TextBlock> boxes, int height) {
+        TextBlock found = null;
+        for (TextBlock box : boxes) {
             if (box == null || box.text == null) continue;
             if (!"广告".equals(box.text.replace(" ", ""))) continue;
             if (box.top < height * 88 / 100) continue;
@@ -53,10 +55,10 @@ final class AdPromptMatcher {
         return found;
     }
 
-    private static ReadingTaskLocator.Box findActionAbove(List<ReadingTaskLocator.Box> boxes,
-            ReadingTaskLocator.Box disclosure, int width, int height) {
-        ReadingTaskLocator.Box result = null;
-        for (ReadingTaskLocator.Box box : boxes) {
+    private static TextBlock findActionAbove(List<TextBlock> boxes,
+            TextBlock disclosure, int width, int height) {
+        TextBlock result = null;
+        for (TextBlock box : boxes) {
             if (box == null || box.text == null || box == disclosure) continue;
             if (!inActionBand(box, disclosure, width, height)) continue;
             if (isDeniedLabel(box.text.replace(" ", ""))) return null;
@@ -66,12 +68,12 @@ final class AdPromptMatcher {
         return result;
     }
 
-    private static ReadingTaskLocator.Box findVideoStateAction(List<ReadingTaskLocator.Box> boxes,
+    private static TextBlock findVideoStateAction(List<TextBlock> boxes,
             int width, int height) {
-        ReadingTaskLocator.Box adMark = findAdMark(boxes, height);
+        TextBlock adMark = findAdMark(boxes, height);
         if (adMark == null) return null;
-        ReadingTaskLocator.Box result = null;
-        for (ReadingTaskLocator.Box box : boxes) {
+        TextBlock result = null;
+        for (TextBlock box : boxes) {
             if (box == null || box.text == null || box == adMark) continue;
             if (!inActionBand(box, adMark, width, height)) continue;
             if (isDeniedLabel(box.text.replace(" ", ""))) return null;
@@ -88,7 +90,7 @@ final class AdPromptMatcher {
     }
 
     /** 真机实测 (1200x2670)：按钮文字行距披露行约 77px、水平居中、行高约 58px。 */
-    private static boolean inActionBand(ReadingTaskLocator.Box box, ReadingTaskLocator.Box disclosure,
+    private static boolean inActionBand(TextBlock box, TextBlock disclosure,
             int width, int height) {
         return box.left >= 0 && box.right <= width && box.left < box.right && box.top < box.bottom
                 && box.top >= height * 7 / 10
@@ -103,12 +105,12 @@ final class AdPromptMatcher {
     }
 
     /** One-line diagnosis of why a frame did not match; mirrors findDetails' own predicates. */
-    static String describe(List<ReadingTaskLocator.Box> boxes, int width, int height) {
+    public static String describe(List<TextBlock> boxes, int width, int height) {
         boolean prompt = false;
-        ReadingTaskLocator.Box anchor = width > 0 && height > 0 ? findStabilityAnchor(boxes, width, height) : null;
+        TextBlock anchor = width > 0 && height > 0 ? findStabilityAnchor(boxes, width, height) : null;
         boolean videoState = anchor != null && "广告".equals(anchor.text);
         StringBuilder lower = new StringBuilder();
-        for (ReadingTaskLocator.Box box : boxes) {
+        for (TextBlock box : boxes) {
             if (box == null || box.text == null) continue;
             String text = box.text.replace(" ", "");
             if (text.contains("点击") && text.contains("15") && text.contains("秒") && text.contains("奖励")) prompt = true;
@@ -121,8 +123,8 @@ final class AdPromptMatcher {
                 + " lower=[" + lower + "]";
     }
 
-    static boolean hasReward(List<ReadingTaskLocator.Box> boxes) {
-        for (ReadingTaskLocator.Box box : boxes) {
+    public static boolean hasReward(List<TextBlock> boxes) {
+        for (TextBlock box : boxes) {
             if (box != null && box.text != null && box.text.replace(" ", "").contains("恭喜已获得奖励")) return true;
         }
         return false;

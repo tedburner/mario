@@ -1,5 +1,7 @@
 package com.mario.assistant;
 
+import com.mario.assistant.domain.welfare.ReadingNavigationPolicy;
+
 import org.junit.Test;
 import static org.junit.Assert.*;
 

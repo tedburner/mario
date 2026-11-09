@@ -1,19 +1,22 @@
 package com.mario.assistant;
 
+import com.mario.assistant.domain.model.TextBlock;
+import com.mario.assistant.domain.welfare.SigninPolicy;
+
 import java.util.Arrays;
 import java.util.Collections;
 import org.junit.Test;
 import static org.junit.Assert.*;
 
 public class SigninPolicyTest {
-    private static ReadingTaskLocator.Box box(String text) {
-        return new ReadingTaskLocator.Box(text, 200, 1100, 1000, 1160);
+    private static TextBlock box(String text) {
+        return new TextBlock(text, 200, 1100, 1000, 1160);
     }
     @Test public void findsSigninButtonOnly() {
-        ReadingTaskLocator.Box sign = box("立即签到");
+        TextBlock sign = box("立即签到");
         assertSame(sign, SigninPolicy.findSigninButton(Arrays.asList(
                 box("连签7天最高领192积分"), sign)));
-        ReadingTaskLocator.Box spaced = box("立即 签到");
+        TextBlock spaced = box("立即 签到");
         assertSame(spaced, SigninPolicy.findSigninButton(Collections.singletonList(spaced)));
     }
     @Test public void ignoresTabsAndPromotions() {

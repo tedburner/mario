@@ -1,5 +1,7 @@
 package com.mario.assistant;
 
+import com.mario.assistant.infrastructure.a11y.TreeSearch;
+
 import java.util.Arrays;
 import java.util.Collections;
 import java.util.List;

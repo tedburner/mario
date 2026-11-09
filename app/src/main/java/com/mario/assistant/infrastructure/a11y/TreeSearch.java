@@ -1,11 +1,11 @@
-package com.mario.assistant;
+package com.mario.assistant.infrastructure.a11y;
 
 import java.util.ArrayList;
 import java.util.List;
 
-final class TreeSearch {
-    interface Access<T> { boolean matches(T node, String label); List<T> children(T node); }
-    static <T> List<T> find(T root, String label, Access<T> access, int limit) {
+public final class TreeSearch {
+    public interface Access<T> { boolean matches(T node, String label); List<T> children(T node); }
+    public static <T> List<T> find(T root, String label, Access<T> access, int limit) {
         List<T> found = new ArrayList<>();
         if (root == null || limit <= 0) return found;
         List<T> queue = new ArrayList<>();

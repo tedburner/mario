@@ -13,12 +13,13 @@ import android.os.Process;
 import android.util.Log;
 
 /**
- * 仅限 adb（shell uid=2000）触发的调试手势桥：tap / swipe / back。
+ * 仅限 adb（shell uid=2000）触发的调试手势桥：tap / swipe / back / arm / recover。
  * 本机调试通道；广播回调中校验调用方 uid，普通应用无法触发。
  * 用法：adb shell am broadcast -a com.mario.assistant.GESTURE
  *   --es type tap --ei x 600 --ei y 1200
  *   --es type swipe --ei x1 600 --ei y1 1800 --ei x2 600 --ei y2 900 --ei dur 350
  *   --es type back
+ *   --es type arm | recover | collect
  */
 public final class GestureBridge extends BroadcastReceiver {
     private static final String TAG = "MarioGesture";
@@ -71,6 +72,21 @@ public final class GestureBridge extends BroadcastReceiver {
     private static void exec(TaskService service, Intent cmd) {
         String type = cmd.getStringExtra("type");
         try {
+            if ("arm".equals(type)) {
+                service.arm();
+                Log.i(TAG, "arm");
+                return;
+            }
+            if ("recover".equals(type)) {
+                boolean ok = service.debugForestRecover();
+                Log.i(TAG, "recover ok=" + ok);
+                return;
+            }
+            if ("collect".equals(type)) {
+                boolean ok = service.debugForestCollect();
+                Log.i(TAG, "collect ok=" + ok);
+                return;
+            }
             if ("back".equals(type)) {
                 boolean ok = service.performGlobalAction(android.accessibilityservice.AccessibilityService.GLOBAL_ACTION_BACK);
                 Log.i(TAG, "back ok=" + ok);

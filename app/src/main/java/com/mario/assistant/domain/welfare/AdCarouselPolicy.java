@@ -1,4 +1,6 @@
-package com.mario.assistant;
+package com.mario.assistant.domain.welfare;
+
+import com.mario.assistant.domain.model.TextBlock;
 
 import java.util.List;
 
@@ -7,12 +9,12 @@ import java.util.List;
  * 左滑进入下一支广告；全部完成后提示“恭喜完成任务”，可关闭广告页。
  * 这里只做 OCR 文本判定，手势与流程状态在 TaskService。
  */
-final class AdCarouselPolicy {
-    static boolean isContinuePrompt(List<ReadingTaskLocator.Box> boxes) {
+public final class AdCarouselPolicy {
+    public static boolean isContinuePrompt(List<TextBlock> boxes) {
         // 真机整行为“已完成第2个任务 滑动继续完成 10点章节卡”；ML Kit 可能把它拆成多个框，
         // 因此“滑动”和“继续”允许分布在不同框里，但必须同时出现。
         boolean slide = false, cont = false;
-        for (ReadingTaskLocator.Box box : boxes) {
+        for (TextBlock box : boxes) {
             if (box == null || box.text == null) continue;
             String text = box.text.replace(" ", "");
             if (text.contains("滑动")) slide = true;
@@ -21,8 +23,8 @@ final class AdCarouselPolicy {
         return slide && cont;
     }
 
-    static boolean isCompletion(List<ReadingTaskLocator.Box> boxes) {
-        for (ReadingTaskLocator.Box box : boxes) {
+    public static boolean isCompletion(List<TextBlock> boxes) {
+        for (TextBlock box : boxes) {
             if (box == null || box.text == null) continue;
             if (box.text.replace(" ", "").contains("恭喜完成任务")) return true;
         }
@@ -30,10 +32,10 @@ final class AdCarouselPolicy {
     }
 
     /** 轮播完成后的奖励弹窗按钮（真机：“恭喜获得 10点章节卡（1天）”+“知道了”）。 */
-    static ReadingTaskLocator.Box findDismissButton(List<ReadingTaskLocator.Box> boxes) {
+    public static TextBlock findDismissButton(List<TextBlock> boxes) {
         boolean rewardDialog = false;
-        ReadingTaskLocator.Box found = null;
-        for (ReadingTaskLocator.Box box : boxes) {
+        TextBlock found = null;
+        for (TextBlock box : boxes) {
             if (box == null || box.text == null) continue;
             String text = box.text.replace(" ", "");
             // ML Kit 实测会把“恭喜获得”误读为“恭套获得”，不能只认完整“恭喜”。

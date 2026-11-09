@@ -1,13 +1,16 @@
 package com.mario.assistant;
 
+import com.mario.assistant.domain.model.TextBlock;
+import com.mario.assistant.domain.welfare.AdCarouselPolicy;
+
 import org.junit.Test;
 import java.util.Arrays;
 import java.util.Collections;
 import static org.junit.Assert.*;
 
 public class AdCarouselPolicyTest {
-    private static ReadingTaskLocator.Box box(String text) {
-        return new ReadingTaskLocator.Box(text, 0, 0, 10, 10);
+    private static TextBlock box(String text) {
+        return new TextBlock(text, 0, 0, 10, 10);
     }
     @Test public void detectsLiveCarouselPromptFromDeviceFrame() {
         // 真机截图整行：“已完成第2个任务 滑动继续完成 10点章节卡”。
@@ -45,11 +48,11 @@ public class AdCarouselPolicyTest {
         assertFalse(AdCarouselPolicy.isCompletion(Collections.emptyList()));
     }
     @Test public void findsUniqueDismissButtonOnly() {
-        ReadingTaskLocator.Box know = box("知道了");
+        TextBlock know = box("知道了");
         assertSame(know, AdCarouselPolicy.findDismissButton(Arrays.asList(
                 box("恭喜获得"), box("10点章节卡（1天）"), know)));
         // OCR 带标点/误识时按“知道”包含匹配。
-        ReadingTaskLocator.Box knowPunct = box("知道了。");
+        TextBlock knowPunct = box("知道了。");
         assertSame(knowPunct, AdCarouselPolicy.findDismissButton(Arrays.asList(
                 box("恭喜获得"), knowPunct)));
         // 没有奖励文案时不认“知道了”，避免误点其他页面的提示。
@@ -60,10 +63,10 @@ public class AdCarouselPolicyTest {
     }
     @Test public void toleratesCongratsMisreadOnCouponDialog() {
         // 真机 ML Kit 把“恭喜获得200-30点订阅券”读成“恭套获得200-30点订阅券”。
-        ReadingTaskLocator.Box know = box("知道了");
+        TextBlock know = box("知道了");
         assertSame(know, AdCarouselPolicy.findDismissButton(Arrays.asList(
                 box("恭套获得200-30点订阅券"), know)));
-        ReadingTaskLocator.Box knowFull = box("知道了");
+        TextBlock knowFull = box("知道了");
         assertSame(knowFull, AdCarouselPolicy.findDismissButton(Arrays.asList(
                 box("恭喜获得 200-30点订阅券"), knowFull)));
     }
