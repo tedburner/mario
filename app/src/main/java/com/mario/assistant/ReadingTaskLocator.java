@@ -8,6 +8,19 @@ final class ReadingTaskLocator {
     /** 标题变体：去掉装饰字符后比对（真机截图：点数页同一里程碑行标题为“【限时】广告·加点！”）。 */
     static final String[] NORMALIZED_TITLES = {"限时广告加点"};
 
+    /** 福利中心页的稳定文案锚点，覆盖顶部、任务区、限时福利和底部兑换区（页面滚到任何位置都能认出）。 */
+    static final String[] WELFARE_MARKERS = {"福利中心", "完成任务得奖励", "做任务领惊喜福利", "本周收益", "积分商城",
+            "限时福利", "携程签到", "添加小组件", "阅读得积分", "积分全额兑", "今日必抢", "补签卡", "仅正式会员可兑换", "更多积分好礼"};
+
+    static boolean isWelfareCenter(List<Box> boxes) {
+        for (Box box : boxes) {
+            if (box == null || box.text == null) continue;
+            String text = box.text.replace(" ", "");
+            for (String marker : WELFARE_MARKERS) if (text.contains(marker)) return true;
+        }
+        return false;
+    }
+
     static final class Box {
         final String text; final int left, top, right, bottom;
         Box(String text, int left, int top, int right, int bottom) {
@@ -32,19 +45,73 @@ final class ReadingTaskLocator {
         }
         for (String title : ROW_TITLES) {
             Box titleBox = soleTitle(boxes, title);
+            if (titleBox == null && "去携程签到领积分".equals(title)) titleBox = soleCtripSigninTitle(boxes);
             if (titleBox == null) continue;
-            // 携程签到行为签到类任务，按钮文案待真机确认，先接受去完成/去签到。
-            Box button = soleButton(boxes, titleBox, width,
-                    "去携程签到领积分".equals(title) ? new String[]{"去完成", "去签到"} : new String[]{"去完成"});
+            if ("去携程签到领积分".equals(title)) {
+                // 真机 ML Kit 把该行按钮读成“领奖励”（其余行是“去完成”）；文案不可靠，
+                // 按“标题右侧、同一行内的唯一短标签”做几何定位。
+                Box button = soleSigninButton(boxes, titleBox, width);
+                if (button == null || button.text.replace(" ", "").startsWith("已")) continue;
+                return new Row(title, button, false, true);
+            }
+            Box button = soleButton(boxes, titleBox, width, new String[]{"去完成"});
             if (button == null) continue;
-            return new Row(title, button, false, "去携程签到领积分".equals(title));
+            return new Row(title, button, false, false);
         }
         return null;
+    }
+    /** 携程行已领取：标题唯一，右侧同一行带内有“已…”标签（真机为“已领取”或误读成“已领”）。 */
+    static boolean claimedSignin(List<Box> boxes, int width) {
+        Box title = soleCtripSigninTitle(boxes);
+        if (title == null) return false;
+        if (title.left < 0 || title.right >= width || title.top >= title.bottom) return false;
+        int titleCenter = (title.top + title.bottom) / 2;
+        for (Box box : boxes) {
+            if (box == null || box.text == null) continue;
+            String text = box.text.replace(" ", "");
+            if (!text.startsWith("已") || text.length() > 6 || text.contains("携程")) continue;
+            if (box.left <= title.right || box.right > width || box.left >= box.right || box.top >= box.bottom) continue;
+            int overlap = Math.min(title.bottom, box.bottom) - Math.max(title.top, box.top);
+            int centerDiff = Math.abs((box.top + box.bottom) / 2 - titleCenter);
+            if (overlap <= 0 && centerDiff > 60) continue;
+            return true;
+        }
+        return false;
+    }
+    /** 签到行的按钮：标题右侧、纵向同一条带内的唯一短标签（不接受含“携程”的文案）。 */
+    private static Box soleSigninButton(List<Box> boxes, Box title, int width) {
+        if (title.left < 0 || title.right >= width || title.top >= title.bottom) return null;
+        int titleCenter = (title.top + title.bottom) / 2;
+        Box result = null;
+        for (Box box : boxes) {
+            if (box == null || box.text == null) continue;
+            String text = box.text.replace(" ", "");
+            if (text.isEmpty() || text.length() > 6 || text.contains("携程")) continue;
+            if (box.left <= title.right || box.right > width || box.left >= box.right || box.top >= box.bottom) continue;
+            int overlap = Math.min(title.bottom, box.bottom) - Math.max(title.top, box.top);
+            int centerDiff = Math.abs((box.top + box.bottom) / 2 - titleCenter);
+            if (overlap <= 0 && centerDiff > 60) continue;
+            if (result != null) return null;
+            result = box;
+        }
+        return result;
     }
     private static Box soleTitle(List<Box> boxes, String text) {
         Box found = null;
         for (Box box : boxes) {
             if (box == null || !text.equals(box.text)) continue;
+            if (found != null) return null;
+            found = box;
+        }
+        return found;
+    }
+    /** 携程行标题允许 OCR 轻微差异（真机为“去携程签到领积分”）。 */
+    private static Box soleCtripSigninTitle(List<Box> boxes) {
+        Box found = null;
+        for (Box box : boxes) {
+            if (box == null || box.text == null) continue;
+            String text = box.text.replace(" ", "");
+            if (!text.contains("携程") || !text.contains("签到")) continue;
             if (found != null) return null;
             found = box;
         }

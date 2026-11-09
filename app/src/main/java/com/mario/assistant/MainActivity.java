@@ -3,13 +3,17 @@ package com.mario.assistant;
 import android.accessibilityservice.AccessibilityServiceInfo;
 import android.app.Activity;
 import android.app.AlertDialog;
+import android.app.AppOpsManager;
+import android.app.NotificationManager;
 import android.content.Intent;
 import android.content.SharedPreferences;
 import android.graphics.Bitmap;
 import android.graphics.Shader;
 import android.graphics.drawable.BitmapDrawable;
 import android.os.Bundle;
+import android.os.PowerManager;
 import android.provider.Settings;
+import android.util.Log;
 import android.view.Gravity;
 import android.view.View;
 import android.view.accessibility.AccessibilityManager;
@@ -22,12 +26,6 @@ import java.util.function.Consumer;
 
 /** 马里奥像素风主界面：游戏 HUD + 分组按钮 + SMB 对话底板运行结果。 */
 public final class MainActivity extends Activity {
-    private static final String CHECKLIST = "1. 允许通知权限——通知栏可见运行状态\n"
-            + "2. 省电策略设为「无限制」：设置 → 应用管理 → Mario → 省电策略 → 无限制\n"
-            + "3. 最近任务里长按本应用卡片 → 点「锁定」\n"
-            + "4. 试运行期间不要划掉本应用\n"
-            + "5. 点击广告跳转后系统可能短暂冻结本应用（约 1–2 分钟），解冻后自动继续；期间触屏会导致流程如实停止";
-
     private SharedPreferences prefs;
     private TextView hudService;
     private TextView hudRun;
@@ -54,17 +52,18 @@ public final class MainActivity extends Activity {
         TextView hint = MarioTheme.button(this, "出发前检查（防冻结）",
                 PixelArt.sprite(this, Sprites.exclaimBlock(), 18), MarioTheme.BRICK, 13, 42);
         hint.setOnClickListener(v -> new AlertDialog.Builder(this)
-                .setTitle("出发前检查（HyperOS 防冻结）")
-                .setMessage(CHECKLIST)
+                .setTitle("出发前检查")
+                .setMessage(buildChecklist())
+                .setNeutralButton("其他权限", (d, w) -> startActivity(overlaySettingsIntent()))
                 .setPositiveButton("明白了", null)
                 .show());
         root.addView(stacked(hint, 16, 6));
 
         root.addView(stacked(section("任务试运行"), 14, 6));
-        root.addView(stacked(runButton("森林任务", Sprites.mushroom(), MarioTheme.PIPE,
-                "未找到支付宝。", "com.eg.android.AlipayGphone", TaskService::arm), 0, 10));
         root.addView(stacked(runButton("起点任务", Sprites.coin(), MarioTheme.PIPE,
-                "未找到起点读书。", "com.qidian.QDReader", TaskService::inspectReading), 0, 10));
+                "未找到起点读书。", "com.qidian.QDReader", true, TaskService::inspectReading), 0, 10));
+        root.addView(stacked(runButton("森林任务", Sprites.mushroom(), MarioTheme.PIPE,
+                "未找到支付宝。", "com.eg.android.AlipayGphone", false, TaskService::arm), 0, 10));
         TextView stop = MarioTheme.button(this, "停止运行",
                 PixelArt.sprite(this, Sprites.bomb(), 24), MarioTheme.DANGER, 17, 54);
         stop.setOnClickListener(v -> {
@@ -189,7 +188,7 @@ public final class MainActivity extends Activity {
     }
 
     private TextView runButton(String text, Bitmap icon, int[] colors, String missing,
-                               String pkg, Consumer<TaskService> action) {
+                               String pkg, boolean overlayRequired, Consumer<TaskService> action) {
         TextView button = MarioTheme.button(this, text, PixelArt.sprite(this, icon, 24), colors, 17, 54);
         button.setOnClickListener(v -> {
             TaskService service = TaskService.connected();
@@ -198,10 +197,32 @@ public final class MainActivity extends Activity {
                 resultStatus.setText(service == null ? "请先开启无障碍服务。" : missing);
                 return;
             }
-            action.accept(service);
-            startActivity(launch);
-            prefs.edit().putInt("run_count", prefs.getInt("run_count", 0) + 1).apply();
-            refreshAll(true);
+            Runnable start = () -> {
+                action.accept(service);
+                startActivity(launch);
+                prefs.edit().putInt("run_count", prefs.getInt("run_count", 0) + 1).apply();
+                refreshAll(true);
+            };
+            // Android 14+ 无可见窗口时后台启动 Activity 会被系统静默拦截（logcat: Abort background
+            // activity starts），叠加 MIUI 的「后台弹出界面」限制；缺少覆盖窗口权限时预先提示。
+            if (overlayRequired && !Settings.canDrawOverlays(this)) {
+                new AlertDialog.Builder(this)
+                        .setTitle("还差一项权限")
+                        .setMessage("跳转第三方广告后，系统会拦截后台启动起点。\n\n"
+                                + "请到 设置 → 应用管理 → Mario → 其他权限，\n"
+                                + "开启「后台弹出界面」和「显示悬浮窗」，再重新运行。")
+                        .setPositiveButton("去授权", (d, w) -> {
+                            try {
+                                startActivity(overlaySettingsIntent());
+                            } catch (RuntimeException e) {
+                                resultStatus.setText("无法打开授权页面，请手动到 其他权限 中开启。");
+                            }
+                        })
+                        .setNegativeButton("仍要继续", (d, w) -> start.run())
+                        .show();
+                return;
+            }
+            start.run();
         });
         return button;
     }
@@ -264,6 +285,92 @@ public final class MainActivity extends Activity {
         return v;
     }
 
+    /** 出发前检查：逐项读取实际授权状态；读不到的系统权限如实标注，不假装满足。 */
+    private String buildChecklist() {
+        boolean a11y = accessibilityEnabled();
+        boolean notify = notificationsEnabled();
+        boolean overlay = Settings.canDrawOverlays(this);
+        boolean battery = batteryUnrestricted();
+        Boolean popup = isMiui() ? miuiBackgroundPopup() : null;
+        StringBuilder sb = new StringBuilder();
+        appendCheck(sb, a11y, "无障碍服务");
+        appendCheck(sb, notify, "通知权限");
+        appendCheck(sb, overlay, "显示悬浮窗（后台启动豁免）");
+        if (isMiui()) {
+            if (popup == null) sb.append("⚠️ 后台弹出界面（MIUI）：系统未开放读取，请到「其他权限」确认\n");
+            else appendCheck(sb, popup, "后台弹出界面（MIUI）");
+        }
+        appendCheck(sb, battery, "省电策略：无限制");
+        boolean all = a11y && notify && overlay && battery && (!isMiui() || Boolean.TRUE.equals(popup));
+        if (!all) {
+            sb.append("\n未满足项请先修复。缺少悬浮窗或后台弹出界面时，跳转第三方广告后系统会拦截切回起点。\n")
+                    .append("另：最近任务里锁定本应用，运行期间不要划掉。");
+        }
+        return sb.toString().trim();
+    }
+
+    private static void appendCheck(StringBuilder sb, boolean ok, String label) {
+        sb.append(ok ? "✅ " : "❌ ").append(label).append('\n');
+    }
+
+    private Intent overlaySettingsIntent() {
+        return new Intent(Settings.ACTION_MANAGE_OVERLAY_PERMISSION,
+                android.net.Uri.fromParts("package", getPackageName(), null));
+    }
+
+    private boolean notificationsEnabled() {
+        NotificationManager nm = getSystemService(NotificationManager.class);
+        if (nm == null || !nm.areNotificationsEnabled()) return false;
+        return android.os.Build.VERSION.SDK_INT < 33
+                || checkSelfPermission(android.Manifest.permission.POST_NOTIFICATIONS)
+                        == android.content.pm.PackageManager.PERMISSION_GRANTED;
+    }
+
+    private boolean batteryUnrestricted() {
+        PowerManager pm = getSystemService(PowerManager.class);
+        return pm != null && pm.isIgnoringBatteryOptimizations(getPackageName());
+    }
+
+    private static boolean isMiui() {
+        try {
+            Class<?> props = Class.forName("android.os.SystemProperties");
+            Object name = props.getMethod("get", String.class).invoke(null, "ro.miui.ui.version.name");
+            return name instanceof String && !((String) name).isEmpty();
+        } catch (Exception e) {
+            return false;
+        }
+    }
+
+    /** MIUI 自定义 op 10021 = 后台弹出界面；无公开 API，只能反射隐藏方法读取。 */
+    private Boolean miuiBackgroundPopup() {
+        try {
+            AppOpsManager ops = (AppOpsManager) getSystemService(APP_OPS_SERVICE);
+            if (ops == null) return null;
+            java.lang.reflect.Method check = AppOpsManager.class.getMethod(
+                    "checkOpNoThrow", int.class, int.class, String.class);
+            Object result = check.invoke(ops, 10021, android.os.Process.myUid(), getPackageName());
+            if (!(result instanceof Integer)) return null;
+            Log.i("MarioAdDiag", "miui op 10021 mode=" + result);
+            return (Integer) result == AppOpsManager.MODE_ALLOWED;
+        } catch (Exception e) {
+            Log.i("MarioAdDiag", "miui op 10021 unavailable: " + e);
+            return null;
+        }
+    }
+
+    private boolean accessibilityEnabled() {
+        AccessibilityManager manager = (AccessibilityManager) getSystemService(ACCESSIBILITY_SERVICE);
+        if (manager == null) return false;
+        for (AccessibilityServiceInfo info : manager.getEnabledAccessibilityServiceList(AccessibilityServiceInfo.FEEDBACK_ALL_MASK)) {
+            if (info.getResolveInfo() != null && info.getResolveInfo().serviceInfo != null
+                    && getPackageName().equals(info.getResolveInfo().serviceInfo.packageName)
+                    && TaskService.class.getName().equals(info.getResolveInfo().serviceInfo.name)) {
+                return true;
+            }
+        }
+        return false;
+    }
+
     private void refreshAll(boolean accessibilityEnabled) {
         TaskService service = TaskService.connected();
         hudService.setText(accessibilityEnabled ? "ON" : "OFF");
@@ -288,18 +395,6 @@ public final class MainActivity extends Activity {
 
     @Override protected void onResume() {
         super.onResume();
-        AccessibilityManager manager = (AccessibilityManager) getSystemService(ACCESSIBILITY_SERVICE);
-        boolean enabled = false;
-        if (manager != null) {
-            for (AccessibilityServiceInfo info : manager.getEnabledAccessibilityServiceList(AccessibilityServiceInfo.FEEDBACK_ALL_MASK)) {
-                if (info.getResolveInfo() != null && info.getResolveInfo().serviceInfo != null
-                        && getPackageName().equals(info.getResolveInfo().serviceInfo.packageName)
-                        && TaskService.class.getName().equals(info.getResolveInfo().serviceInfo.name)) {
-                    enabled = true;
-                    break;
-                }
-            }
-        }
-        refreshAll(enabled);
+        refreshAll(accessibilityEnabled());
     }
 }

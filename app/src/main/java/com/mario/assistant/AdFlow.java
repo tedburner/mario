@@ -34,5 +34,7 @@ final class AdFlow {
     boolean shouldReturn(String pkg, long now) { return isDestination(pkg) && timer.readyToReturn(now); }
     void returnRequested() { if (stage == Stage.VISITING) stage = Stage.RETURNING; }
     boolean confirmReward() { return stage == Stage.RETURNING; }
+    /** 多任务轮播中切到下一支广告：每支广告独立走“点击→停留→返回”流程。 */
+    void reset() { timer.cancel(); stage = Stage.START; destination = null; inApp = false; }
     void cancel() { timer.cancel(); stage = Stage.CANCELLED; }
 }

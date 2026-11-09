@@ -138,6 +138,62 @@ public class ReadingTaskLocatorTest {
         // 无页头锚点且全是页头/卡片/标签时返回 null。
         assertNull(ReadingTaskLocator.firstBook(Arrays.asList(dailyBook, dailyTag, tab), 2670));
     }
+    @Test public void recognizesWelfarePageWithoutTitleBar() {
+        // 真机：福利中心滚到顶部时标题栏没有“福利中心”，只有“做任务领惊喜福利”等文案；
+        // 只认“福利中心”会漏判，导致找不到任务时也不下滑。
+        assertTrue(ReadingTaskLocator.isWelfareCenter(Arrays.asList(
+                new ReadingTaskLocator.Box("做任务领惊喜福利", 50, 1900, 300, 1950),
+                new ReadingTaskLocator.Box("本周收益", 400, 500, 600, 550))));
+        assertTrue(ReadingTaskLocator.isWelfareCenter(Collections.singletonList(
+                new ReadingTaskLocator.Box("福利中心", 300, 100, 500, 160))));
+        assertFalse(ReadingTaskLocator.isWelfareCenter(Arrays.asList(
+                new ReadingTaskLocator.Box("书架", 40, 600, 160, 640),
+                new ReadingTaskLocator.Box("我的", 900, 2400, 960, 2450))));
+    }
+    @Test public void ctripRowToleratesOcrVariants() {
+        ReadingTaskLocator.Box action = new ReadingTaskLocator.Box("去完成", 800, 1505, 950, 1555);
+        for (String variant : new String[]{"去携程签到领积分", "携程签到领积分", "去携程签到"}) {
+            ReadingTaskLocator.Box title = new ReadingTaskLocator.Box(variant, 50, 1500, 300, 1550);
+            ReadingTaskLocator.Row row = ReadingTaskLocator.find(Arrays.asList(title, action), 1000);
+            assertNotNull(variant, row);
+            assertTrue(variant, row.signin);
+        }
+        // 真机 ML Kit 把该行按钮读成“领奖励”：按标题右侧几何定位，不依赖按钮文案。
+        ReadingTaskLocator.Box title = new ReadingTaskLocator.Box("去携程签到领积分", 81, 1383, 465, 1429);
+        ReadingTaskLocator.Box misread = new ReadingTaskLocator.Box("领奖励", 947, 1418, 1057, 1456);
+        ReadingTaskLocator.Box coin = new ReadingTaskLocator.Box("+1点币(。", 81, 1456, 256, 1496);
+        ReadingTaskLocator.Box above = new ReadingTaskLocator.Box("去完成", 947, 1225, 1061, 1252);
+        ReadingTaskLocator.Row signin = ReadingTaskLocator.find(
+                Arrays.asList(title, coin, above, misread), 1200);
+        assertNotNull(signin);
+        assertSame(misread, signin.button);
+        assertTrue(signin.signin);
+        // 同一行右侧出现两个短标签时不点（避免误点帮助图标/其他控件）。
+        assertNull(ReadingTaskLocator.find(Arrays.asList(title,
+                new ReadingTaskLocator.Box("去完成", 800, 1385, 900, 1430),
+                new ReadingTaskLocator.Box("领奖励", 947, 1418, 1057, 1456)), 1200));
+        // 其他行仍只认“去完成”文案，不套用签到行的几何兜底。
+        ReadingTaskLocator.Box incentive = new ReadingTaskLocator.Box("激励任务", 50, 1383, 260, 1429);
+        assertNull(ReadingTaskLocator.find(Arrays.asList(incentive,
+                new ReadingTaskLocator.Box("领奖励", 947, 1418, 1057, 1456)), 1200));
+    }
+    @Test public void claimedCtripRowIsSkippedAndReported() {
+        ReadingTaskLocator.Box title = new ReadingTaskLocator.Box("去携程签到领积分", 81, 1383, 465, 1429);
+        ReadingTaskLocator.Box claimed = new ReadingTaskLocator.Box("已领取", 947, 1418, 1057, 1456);
+        // 已领取：不再点击（几何定位会接受任意短标签，必须排除“已…”），并报告已领取用于收尾。
+        assertNull(ReadingTaskLocator.find(Arrays.asList(title, claimed), 1200));
+        assertTrue(ReadingTaskLocator.claimedSignin(Arrays.asList(title, claimed), 1200));
+        // “领奖励”是可点的兑换态，不算已领取。
+        ReadingTaskLocator.Box claimable = new ReadingTaskLocator.Box("领奖励", 947, 1418, 1057, 1456);
+        assertNotNull(ReadingTaskLocator.find(Arrays.asList(title, claimable), 1200));
+        assertFalse(ReadingTaskLocator.claimedSignin(Arrays.asList(title, claimable), 1200));
+        // 其他行的“已领取”不触发收尾。
+        assertFalse(ReadingTaskLocator.claimedSignin(Arrays.asList(
+                new ReadingTaskLocator.Box("激励任务", 50, 1383, 260, 1429), claimed), 1200));
+        // 同一屏远处的“已领取”（不同任务行）不算。
+        assertFalse(ReadingTaskLocator.claimedSignin(Arrays.asList(title,
+                new ReadingTaskLocator.Box("已领取", 947, 1718, 1057, 1756)), 1200));
+    }
     @Test public void describeListsRecognizedRowTitlesButtonsAndBottomZone() {
         String summary = ReadingTaskLocator.describe(Arrays.asList(
                 new ReadingTaskLocator.Box("激励任务", 50, 500, 180, 550),

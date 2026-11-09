@@ -43,6 +43,33 @@ public class AdFlowTest {
         flow.returnRequested();
         assertTrue(flow.confirmReward());
     }
+    @Test public void resetAllowsNextCarouselAd() {
+        AdFlow flow = new AdFlow();
+        flow.detailsRequested();
+        flow.observeDetail("com.taobao.idlefish", 1000);
+        assertTrue(flow.shouldReturn("com.taobao.idlefish", 16000));
+        flow.returnRequested();
+        assertTrue(flow.confirmReward());
+        flow.reset();
+        assertFalse(flow.confirmReward());
+        assertFalse(flow.isInApp());
+        flow.detailsRequested();
+        assertTrue(flow.observeDetail("com.jingdong.app.mall", 2000));
+        assertFalse(flow.shouldReturn("com.jingdong.app.mall", 16999));
+        assertTrue(flow.shouldReturn("com.jingdong.app.mall", 17000));
+    }
+    @Test public void resetClearsInAppDetail() {
+        AdFlow flow = new AdFlow();
+        flow.detailsRequested();
+        flow.observeDetailInApp(1000);
+        assertTrue(flow.isInApp());
+        flow.reset();
+        assertFalse(flow.isInApp());
+        flow.detailsRequested();
+        flow.observeDetailInApp(2000);
+        assertTrue(flow.isInApp());
+        assertTrue(flow.shouldReturn("com.qidian.QDReader", 17000));
+    }
     @Test public void inAppModeIgnoredAfterExternalDetailConfirmed() {
         AdFlow flow = new AdFlow();
         flow.detailsRequested();

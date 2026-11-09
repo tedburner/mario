@@ -21,6 +21,7 @@ import android.os.Handler;
 import android.os.HandlerThread;
 import android.os.Looper;
 import android.os.SystemClock;
+import android.provider.Settings;
 import android.util.Log;
 import android.view.accessibility.AccessibilityEvent;
 import android.view.accessibility.AccessibilityNodeInfo;
@@ -45,6 +46,7 @@ public final class TaskService extends AccessibilityService {
     private boolean readingBusy;
     private long readingDeadline;
     private long adTransitionDeadline;
+    private long returnConfirmDeadline; // 跨应用切回起点的前台确认截止时间；0 表示不校验
     private volatile long lastScanAt;
     private int readingStage; // 0: task entry, 1: ad, 2: waiting for detail, 3: viewing, 4: return
     private AdFlow adFlow;
@@ -58,13 +60,26 @@ public final class TaskService extends AccessibilityService {
     private ReadingTaskLocator.Box priorTabTarget;
     private int emptyScans;
     private int scrollAttempts;
+    private boolean scrollReversed;
+    private int claimedFrames;
     private long readingUnlockDeadline;
     private int unlockAttempts;
     private boolean signinTask;
     private int signinFrames;
+    private long signinTapAt;
+    private boolean signinClaimSeen;
+    private int signinIdleFrames;
+    private static final int STAGE_SIGNIN = 6; // 签到落地页（携程）：点“立即签到”后切回起点
     private String currentTaskTitle;
     private boolean currentSignin;
     private int returnedFrames;
+    private int carouselFrames;
+    private int carouselSwipes;
+    private long carouselSwipeAt;
+    private int dialogFrames;
+    private long dialogTapAt;
+    private long adEntryAt;
+    private int adEntryRetries;
     private int readingPhase; // stage 5 内：0=找书架第一本书，1=书中阅读
     private long readingStartedAt;
     private ReadingTaskLocator.Box priorBookTarget;
@@ -86,10 +101,13 @@ public final class TaskService extends AccessibilityService {
             AccessibilityNodeInfo root;
             String pkg;
             if (readingStage == 2 || readingStage == 3) {
-                // 详情页/第三方应用阶段只需要前台包名；避免对陌生窗口做 getRootInActiveWindow
-                // 的同步调用，改用窗口切换事件记录。
+                // 前台包名以当前活动窗口为准：第三方页面上层弹出时仍可能收到起点的窗口事件，
+                // 只用事件记录会把真实前台（如携程签到页）误判成起点（真机实测）。
+                AccessibilityNodeInfo active = getRootInActiveWindow();
+                CharSequence activePkg = active == null ? null : active.getPackageName();
+                pkg = activePkg != null ? activePkg.toString()
+                        : (lastForegroundPkg == null ? "" : lastForegroundPkg);
                 root = null;
-                pkg = lastForegroundPkg == null ? "" : lastForegroundPkg;
             } else {
                 root = getRootInActiveWindow();
                 pkg = root == null || root.getPackageName() == null ? "" : root.getPackageName().toString();
@@ -119,6 +137,7 @@ public final class TaskService extends AccessibilityService {
                             adFlow.returnRequested();
                             readingStage = 4;
                             adTransitionDeadline = now + 30000;
+                            returnConfirmDeadline = 0;
                             save("已在起点内停留 15 秒，已按返回键退出详情页，等待奖励提示。");
                         } else {
                             stopReading("无法执行返回操作，请手动返回。");
@@ -133,13 +152,25 @@ public final class TaskService extends AccessibilityService {
                                 adFlow.returnRequested();
                                 readingStage = 4;
                                 adTransitionDeadline = now + 30000;
-                                save("已尝试切回起点，等待奖励提示。");
+                                returnConfirmDeadline = now + 5000;
+                                save("已请求切回起点，等待前台窗口切换。");
                             } catch (RuntimeException e) { stopReading("无法自动切回起点，请手动返回。"); }
                         }
                     }
                 }
-            } else if (readingStage == 4 && now >= adTransitionDeadline) {
-                stopReading("未能确认返回后的奖励，请手动检查。");
+            } else if (readingStage == 4) {
+                boolean backInReading = "com.qidian.QDReader".equals(lastForegroundPkg)
+                        || "com.qidian.QDReader".equals(pkg);
+                if (returnConfirmDeadline > 0 && !backInReading && now >= returnConfirmDeadline) {
+                    stopReading(Settings.canDrawOverlays(TaskService.this)
+                            ? "系统拦截了后台启动起点，请检查 MIUI「后台弹出界面」权限后重试。"
+                            : "系统拦截了后台启动起点：请授予「后台弹出界面」和「显示悬浮窗」后重试。");
+                } else if (now >= adTransitionDeadline) {
+                    stopReading("未能确认返回后的奖励，请手动检查。");
+                } else if (!readingBusy && (root != null || "com.qidian.QDReader".equals(lastForegroundPkg))) {
+                    // 返回起点后的奖励/轮播提示只能靠 OCR 判定，必须在此持续触发识别。
+                    inspectReadingScreen();
+                }
             } else if (readingStage == 5) {
                 // 阅读解锁两阶段：找到书架第一本书 → 书中阅读 1 分钟 → 返回并重走导航
                 if (now >= readingUnlockDeadline) {
@@ -149,6 +180,10 @@ public final class TaskService extends AccessibilityService {
                         if (performGlobalAction(GLOBAL_ACTION_BACK)) {
                             readingStage = 0;
                             readingPhase = 0;
+                            // 返回键落到书架页：必须重置导航标记，才能重新走 我→福利中心 链路。
+                            readingNavigationAttempted = false;
+                            emptyScans = 0;
+                            scrollAttempts = 0;
                             save("阅读时间已满，已退出书籍，将重新进入 我-福利中心 继续任务。");
                         } else {
                             stopReading("无法执行返回操作，请手动返回福利中心。");
@@ -156,6 +191,15 @@ public final class TaskService extends AccessibilityService {
                     }
                 } else if (!readingBusy && root != null && "com.qidian.QDReader".equals(pkg)) {
                     inspectReadingScreen(); // OCR 驱动：任务行可见性 / 书架第一本书定位
+                }
+            } else if (readingStage == STAGE_SIGNIN) {
+                // 签到页可能在携程应用内，也可能内嵌在起点；统一靠 OCR 找“立即签到”。
+                if (now >= readingDeadline) {
+                    stopReading(readingTimeoutMessage());
+                } else if (signinTapAt > 0 && now - signinTapAt >= 5000) {
+                    returnAfterSignin(now);
+                } else if (!readingBusy) {
+                    inspectReadingScreen();
                 }
             } else if (!readingBusy && root != null && "com.qidian.QDReader".equals(pkg)) {
                 if (readingStage != 0 || !openReadingCenterIfNeeded(root)) inspectReadingScreen();
@@ -218,12 +262,24 @@ public final class TaskService extends AccessibilityService {
             priorTabTarget = null;
             emptyScans = 0;
             scrollAttempts = 0;
+            scrollReversed = false;
+            claimedFrames = 0;
             unlockAttempts = 0;
             signinTask = false;
             signinFrames = 0;
+            signinTapAt = 0;
+            signinClaimSeen = false;
+            signinIdleFrames = 0;
             currentTaskTitle = null;
             currentSignin = false;
             returnedFrames = 0;
+            carouselFrames = 0;
+            carouselSwipes = 0;
+            carouselSwipeAt = 0;
+            dialogFrames = 0;
+            dialogTapAt = 0;
+            adEntryAt = 0;
+            adEntryRetries = 0;
             readingPhase = 0;
             priorBookTarget = null;
             bookScans = 0;
@@ -231,6 +287,7 @@ public final class TaskService extends AccessibilityService {
             readingBusy = false;
             lastForegroundPkg = null;
             readingDeadline = SystemClock.elapsedRealtime() + 300000;
+            returnConfirmDeadline = 0;
             save("等待起点福利中心，将打开可执行的广告任务行。");
             scanHandler.removeCallbacks(readingScan);
             scanHandler.postDelayed(readingScan, 1000);
@@ -298,6 +355,7 @@ public final class TaskService extends AccessibilityService {
             case 3: return "广告停留期间未能确认返回时机，已超时停止。";
             case 4: return "返回起点后未确认奖励提示，已超时停止。";
             case 5: return "阅读解锁未完成，已超时停止。";
+            case STAGE_SIGNIN: return "未在签到页找到「立即签到」，已超时停止。";
             default: return "未找到可执行的广告任务入口，已超时停止。";
         }
     }
@@ -358,14 +416,34 @@ public final class TaskService extends AccessibilityService {
     /** OCR 结果的业务判定；固定在 scan 线程执行（识别回调线程与流程线程解耦）。 */
     private void handleOcrText(Text text, Bitmap image, long capturedAt) {
         if (!readingArmed) return;
-        AccessibilityNodeInfo current = getRootInActiveWindow();
-        if (current == null || !"com.qidian.QDReader".contentEquals(current.getPackageName())) return;
         List<ReadingTaskLocator.Box> boxes = new ArrayList<>();
         for (Text.TextBlock block : text.getTextBlocks()) {
             for (Text.Line line : block.getLines()) {
                 Rect rect = line.getBoundingBox();
                 if (rect != null) boxes.add(new ReadingTaskLocator.Box(line.getText().replace(" ", ""), rect.left, rect.top, rect.right, rect.bottom));
             }
+        }
+        if (readingStage == STAGE_SIGNIN) {
+            // 签到页属于携程应用，必须在起点的包名过滤之前处理。
+            handleSigninOcr(boxes);
+            return;
+        }
+        AccessibilityNodeInfo current = getRootInActiveWindow();
+        CharSequence currentPkg = current == null ? null : current.getPackageName();
+        boolean qidian = currentPkg != null
+                ? "com.qidian.QDReader".contentEquals(currentPkg)
+                : "com.qidian.QDReader".equals(lastForegroundPkg);
+        if (!qidian) return;
+        if (!AdCarouselPolicy.isContinuePrompt(boxes)) carouselFrames = 0;
+        for (ReadingTaskLocator.Box box : boxes) {
+            if (box == null || box.text == null || !box.text.contains("恭喜")) continue;
+            Log.i("MarioAdDiag", "ocr congrats: " + allText(boxes));
+            break;
+        }
+        for (ReadingTaskLocator.Box box : boxes) {
+            if (box == null || box.text == null || !box.text.contains("知道")) continue;
+            Log.i("MarioAdDiag", "ocr know: " + allText(boxes));
+            break;
         }
         if (readingStage == 1) {
             inspectAdPrompt(boxes, image, capturedAt);
@@ -380,6 +458,12 @@ public final class TaskService extends AccessibilityService {
             return;
         }
         if (readingStage == 4) {
+            Log.i("MarioAdDiag", "stage4 boxes=" + allText(boxes));
+            if (!signinTask && AdCarouselPolicy.isContinuePrompt(boxes)) {
+                handleCarouselPrompt(image);
+                return;
+            }
+            if (dismissKnownDialog(boxes)) return;
             if (signinTask) {
                 // 签到任务：返回起点且连续两帧无奖励弹窗时视为完成；携程为最后一个任务，完成后收尾。
                 if (AdPromptMatcher.hasReward(boxes)) {
@@ -410,17 +494,40 @@ public final class TaskService extends AccessibilityService {
             return;
         }
         if (readingStage != 0) return;
+        if (AdCarouselPolicy.isContinuePrompt(boxes)) { // 上次运行中断在广告轮播页时，先左滑继续
+            handleCarouselPrompt(image);
+            return;
+        }
+        if (dismissKnownDialog(boxes)) return;
         ReadingTaskLocator.Row row = ReadingTaskLocator.find(boxes, image.getWidth());
         if (row == null) {
             priorReadingTarget = null;
             Log.i("MarioAdDiag", ReadingTaskLocator.describe(boxes, image.getHeight()));
-            boolean onWelfarePage = readingNavigationAttempted || hasOcrText(boxes, "福利中心");
+            logSigninGeometry(boxes);
+            if (ReadingTaskLocator.claimedSignin(boxes, image.getWidth())) {
+                // 携程行已是“已领取”，其余任务行也不可点：本轮任务全部完成，不必再滑动到超时。
+                if (++claimedFrames >= 2) {
+                    readingArmed = false;
+                    scanHandler.removeCallbacks(readingScan);
+                    stopRunForeground();
+                    save("「去携程签到领积分」已领取，本轮任务全部完成；请在福利中心核对各项奖励。");
+                }
+                return;
+            }
+            claimedFrames = 0;
+            boolean onWelfarePage = readingNavigationAttempted || ReadingTaskLocator.isWelfareCenter(boxes);
             if (onWelfarePage) {
                 emptyScans++;
                 if (emptyScans >= 2 && scrollAttempts < 6) {
                     emptyScans = 0;
                     scrollAttempts++;
-                    swipe(image.getWidth(), image.getHeight());
+                    swipe(image.getWidth(), image.getHeight(), !scrollReversed);
+                } else if (emptyScans >= 2 && scrollAttempts >= 6 && !scrollReversed) {
+                    // 起点可能停在福利中心底部：继续往下滑不会动，反向回扫找回任务行。
+                    emptyScans = 0;
+                    scrollAttempts = 0;
+                    scrollReversed = true;
+                    swipe(image.getWidth(), image.getHeight(), false);
                 }
             } else {
                 emptyScans = 0;
@@ -429,6 +536,7 @@ public final class TaskService extends AccessibilityService {
             return;
         }
         emptyScans = 0;
+        claimedFrames = 0;
         if (priorWidth != image.getWidth() || priorHeight != image.getHeight()
                 || !VisualTargetGuard.stable(priorReadingTarget, row.button, image.getWidth(), image.getHeight())
                 || SystemClock.elapsedRealtime() - capturedAt > 5000) {
@@ -438,15 +546,16 @@ public final class TaskService extends AccessibilityService {
         }
         priorReadingTarget = null;
         if (row.signin) {
-            // 签到类任务：点击后直接等待落地页（携程/内嵌页），无广告底部操作区阶段。
+            // 签到类任务：点「去完成」后进入携程签到页，由 STAGE_SIGNIN 点「立即签到」再切回。
             signinTask = true;
             signinFrames = 0;
+            signinTapAt = 0;
+            signinClaimSeen = false;
+            signinIdleFrames = 0;
             currentTaskTitle = row.title;
             currentSignin = true;
-            adFlow.detailsRequested();
-            readingStage = 2;
-            adSheetFrames = 0;
-            adTransitionDeadline = SystemClock.elapsedRealtime() + 30000;
+            readingStage = STAGE_SIGNIN;
+            readingDeadline = SystemClock.elapsedRealtime() + 45000;
             tap(row.button.left, row.button.top, row.button.right, row.button.bottom,
                     "已点击「" + row.title + "」，等待签到页面。", "签到入口点击被中断。");
             return;
@@ -471,15 +580,35 @@ public final class TaskService extends AccessibilityService {
             return;
         }
         readingStage = 1;
+        adEntryAt = SystemClock.elapsedRealtime();
         currentTaskTitle = row.title;
         tap(row.button.left, row.button.top, row.button.right, row.button.bottom,
                 "已点击「" + row.title + "」任务入口，等待广告页面。", "任务入口点击被中断。");
+    }
+    /** 携程行定位失败时的原始坐标诊断（输出标题整条带内的所有 OCR 框）。 */
+    private static void logSigninGeometry(List<ReadingTaskLocator.Box> boxes) {
+        ReadingTaskLocator.Box anchor = null;
+        for (ReadingTaskLocator.Box box : boxes) {
+            if (box != null && box.text != null && box.text.contains("携程") && box.text.contains("签到")) { anchor = box; break; }
+        }
+        if (anchor == null) return;
+        StringBuilder sb = new StringBuilder("signin-geom");
+        for (ReadingTaskLocator.Box box : boxes) {
+            if (box == null || box.text == null) continue;
+            if (Math.abs(box.top - anchor.top) > 120) continue;
+            sb.append(' ').append(box.text).append('@').append(box.left).append(',').append(box.top)
+                    .append('-').append(box.right).append(',').append(box.bottom);
+        }
+        Log.i("MarioAdDiag", sb.toString());
     }
     /** 单个任务流程结束：回到 stage 0 继续下一个任务；滚动预算与各阶段状态重置，截止时间顺延。 */
     private void nextTask(String reason) {
         readingStage = 0;
         signinTask = false;
         signinFrames = 0;
+        signinTapAt = 0;
+        signinClaimSeen = false;
+        signinIdleFrames = 0;
         returnedFrames = 0;
         adSheetFrames = 0;
         unlockAttempts = 0;
@@ -489,7 +618,18 @@ public final class TaskService extends AccessibilityService {
         priorAdAnchor = null;
         priorTabTarget = null;
         scrollAttempts = 0;
+        scrollReversed = false;
+        claimedFrames = 0;
         emptyScans = 0;
+        carouselFrames = 0;
+        carouselSwipes = 0;
+        carouselSwipeAt = 0;
+        dialogFrames = 0;
+        dialogTapAt = 0;
+        adEntryAt = 0;
+        adEntryRetries = 0;
+        returnConfirmDeadline = 0;
+        if (adFlow != null) adFlow.reset();
         readingDeadline = SystemClock.elapsedRealtime() + 300000;
         save(reason + "继续查找下一个任务。");
     }
@@ -523,11 +663,28 @@ public final class TaskService extends AccessibilityService {
         tap(tab.left, tab.top, tab.right, tab.bottom,
                 "已点击「我的」标签，前往我的页面。", "「我的」标签点击被中断。");
     }
-    /** 福利中心页内找不到任务行时向上滑动，暴露下方的章节卡等任务行；每次试运行最多 6 次。 */
-    private void swipe(int width, int height) {
+    /** 福利中心页内找不到任务行时滑动，暴露屏外任务行；每次试运行每方向最多 6 次。 */
+    private void swipe(int width, int height, boolean revealBelow) {
         Path path = new Path();
-        path.moveTo(width / 2f, height * 3f / 4f);
-        path.lineTo(width / 2f, height / 4f);
+        if (revealBelow) {
+            path.moveTo(width / 2f, height * 3f / 4f);
+            path.lineTo(width / 2f, height / 4f);
+        } else {
+            path.moveTo(width / 2f, height / 4f);
+            path.lineTo(width / 2f, height * 3f / 4f);
+        }
+        dispatchSwipe(path, revealBelow ? "swipe" : "swipe back",
+                revealBelow ? "已向上滑动福利中心，寻找下方任务行。" : "已向下滑动福利中心，回扫上方任务行。");
+    }
+    /** 广告轮播左滑：手指从右向左，取视频区域中部，避开顶部轮播面板与底部广告卡片。 */
+    private void swipeLeft(int width, int height) {
+        if (width <= 0 || height <= 0) return;
+        Path path = new Path();
+        path.moveTo(width * 85f / 100f, height * 45f / 100f);
+        path.lineTo(width * 15f / 100f, height * 45f / 100f);
+        dispatchSwipe(path, "left swipe", "广告轮播已完成一个任务，已左滑继续下一个任务。");
+    }
+    private void dispatchSwipe(Path path, String tag, String success) {
         GestureDescription gesture = new GestureDescription.Builder()
                 .addStroke(new GestureDescription.StrokeDescription(path, 0, 300)).build();
         Thread dispatch = new Thread(() -> {
@@ -535,18 +692,18 @@ public final class TaskService extends AccessibilityService {
             try {
                 accepted = dispatchGesture(gesture, new GestureResultCallback() {
                     @Override public void onCompleted(GestureDescription g) {
-                        Log.i("MarioAdDiag", "swipe completed");
-                        scanHandler.post(() -> save("已向上滑动福利中心，寻找下方任务行。"));
+                        Log.i("MarioAdDiag", tag + " completed");
+                        scanHandler.post(() -> save(success));
                     }
                     @Override public void onCancelled(GestureDescription g) {
-                        Log.i("MarioAdDiag", "swipe cancelled");
+                        Log.i("MarioAdDiag", tag + " cancelled");
                     }
                 }, scanHandler);
             } catch (RuntimeException e) {
                 accepted = false;
             }
             boolean result = accepted;
-            scanHandler.post(() -> { if (!result) Log.i("MarioAdDiag", "swipe rejected"); });
+            scanHandler.post(() -> { if (!result) Log.i("MarioAdDiag", tag + " rejected"); });
         }, "mario-gesture");
         dispatch.setDaemon(true);
         dispatch.start();
@@ -612,6 +769,42 @@ public final class TaskService extends AccessibilityService {
         tap(book.left, book.top, book.right, book.bottom,
                 "已打开书架第一本书，开始阅读 1 分钟。", "打开书籍被中断。");
     }
+    /** 签到页：连续两帧确认「立即签到」再点；只认这一个文案，推广按钮一概不碰。 */
+    private void handleSigninOcr(List<ReadingTaskLocator.Box> boxes) {
+        if (signinTapAt > 0) return;
+        // 签到已完成后，起点把该行按钮换成“领奖励”，点击后直接弹“恭喜获得 +1点币 / 知道了”。
+        if (dismissKnownDialog(boxes)) { signinClaimSeen = true; signinIdleFrames = 0; return; }
+        ReadingTaskLocator.Box button = SigninPolicy.findSigninButton(boxes);
+        if (button != null) {
+            if (++signinFrames < 2) return;
+            signinFrames = 0;
+            signinTapAt = SystemClock.elapsedRealtime();
+            tap(button.left, button.top, button.right, button.bottom,
+                    "已点击携程「立即签到」，稍后返回起点。", "携程签到点击被中断。");
+            return;
+        }
+        signinFrames = 0;
+        if (signinClaimSeen && ++signinIdleFrames >= 2) {
+            readingArmed = false;
+            scanHandler.removeCallbacks(readingScan);
+            stopRunForeground();
+            save("「去携程签到领积分」奖励已领取，全部任务结束；请在福利中心核对各项奖励。");
+        }
+    }
+    /** 签到点击完成后切回起点，由 stage 4 的签到分支核对奖励并收尾。 */
+    private void returnAfterSignin(long now) {
+        Intent intent = getPackageManager().getLaunchIntentForPackage("com.qidian.QDReader");
+        if (intent == null) { stopReading("无法返回起点，请手动返回。"); return; }
+        try {
+            intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
+            startActivity(intent);
+            readingStage = 4;
+            signinFrames = 0;
+            adTransitionDeadline = now + 30000;
+            returnConfirmDeadline = now + 5000;
+            save("携程签到已点击，正在切回起点核对任务状态。");
+        } catch (RuntimeException e) { stopReading("无法自动切回起点，请手动返回。"); }
+    }
     /** stage 2 且前台仍在起点：广告底部操作区连续两帧消失即确认起点内落地页；若已回到福利中心则如实停止。 */
     private void handleStageTwoOcr(List<ReadingTaskLocator.Box> boxes, Bitmap image) {
         boolean sheetPresent = AdPromptMatcher.findDisclosure(boxes) != null
@@ -628,6 +821,16 @@ public final class TaskService extends AccessibilityService {
         }
     }
     private void inspectAdPrompt(List<ReadingTaskLocator.Box> boxes, Bitmap image, long capturedAt) {
+        if (dismissKnownDialog(boxes)) {
+            // 福利中心奖励弹窗会吞掉任务入口点击；当前仍在福利中心，退回找任务阶段重新定位。
+            readingNavigationAttempted = true;
+            readingStage = 0;
+            return;
+        }
+        if (AdCarouselPolicy.isContinuePrompt(boxes)) {
+            handleCarouselPrompt(image);
+            return;
+        }
         if (AdPromptMatcher.hasReward(boxes)) {
             stopReading("广告显示已获得奖励，请手动关闭并核对任务状态。");
             return;
@@ -643,6 +846,16 @@ public final class TaskService extends AccessibilityService {
             priorAdTarget = null;
             priorAdAnchor = null;
             Log.i("MarioAdDiag", AdPromptMatcher.describe(boxes, width, height));
+            if (ReadingTaskLocator.find(boxes, width) != null
+                    && SystemClock.elapsedRealtime() - adEntryAt > 12000) {
+                // 入口点击未生效（弹窗吞点击/按钮无响应）：回到找任务阶段重新定位，最多重试 2 次。
+                if (++adEntryRetries >= 3) {
+                    stopReading("点击任务入口后未进入广告页，已停止自动操作。");
+                } else {
+                    readingNavigationAttempted = true;
+                    readingStage = 0;
+                }
+            }
             return;
         }
         if (priorWidth != width || priorHeight != height
@@ -667,17 +880,63 @@ public final class TaskService extends AccessibilityService {
     private static String boxSummary(ReadingTaskLocator.Box box) {
         return box == null ? "null" : box.text + "@" + box.left + "," + box.top + "-" + box.right + "," + box.bottom;
     }
+    private static String allText(List<ReadingTaskLocator.Box> boxes) {
+        StringBuilder sb = new StringBuilder();
+        for (ReadingTaskLocator.Box box : boxes) {
+            if (box == null || box.text == null) continue;
+            if (sb.length() > 0) sb.append('|');
+            sb.append(box.text).append('@').append(box.top);
+        }
+        return sb.toString();
+    }
+    /** 轮播页“滑动继续完成”：连续两帧确认后左滑到下一支广告，并按新广告页重新识别浏览入口。 */
+    private void handleCarouselPrompt(Bitmap image) {
+        long now = SystemClock.elapsedRealtime();
+        if (now - carouselSwipeAt < 6000) { carouselFrames = 0; return; } // 刚滑过，等下一支广告加载
+        if (++carouselFrames < 2) return;
+        carouselFrames = 0;
+        if (carouselSwipes >= 3) {
+            stopReading("广告轮播已连续左滑 3 次仍未切换到下一任务，请手动检查。");
+            return;
+        }
+        carouselSwipes++;
+        carouselSwipeAt = now;
+        priorAdTarget = null;
+        priorAdAnchor = null;
+        adSheetFrames = 0;
+        if (adFlow != null) adFlow.reset();
+        readingStage = 1;
+        adEntryAt = now;
+        readingDeadline = now + 300000;
+        swipeLeft(image.getWidth(), image.getHeight());
+    }
+    /** 轮播完成后的奖励弹窗：唯一“知道了”按钮，连续两帧确认后点击关闭。 */
+    private boolean dismissKnownDialog(List<ReadingTaskLocator.Box> boxes) {
+        ReadingTaskLocator.Box target = AdCarouselPolicy.findDismissButton(boxes);
+        if (target == null) { dialogFrames = 0; return false; }
+        long now = SystemClock.elapsedRealtime();
+        if (dialogTapAt > 0 && now - dialogTapAt < 5000) return true; // 刚点过，等弹窗消失
+        if (++dialogFrames < 2) return true;
+        dialogFrames = 0;
+        dialogTapAt = now;
+        tap(target.left, target.top, target.right, target.bottom,
+                "已关闭奖励弹窗。", "关闭奖励弹窗被中断。");
+        return true;
+    }
     private void inspectReward(List<ReadingTaskLocator.Box> boxes, AccessibilityNodeInfo root, Bitmap image, long capturedAt) {
-        if (!adFlow.confirmReward() || !AdPromptMatcher.hasReward(boxes)
+        if (root == null) { rewardFrames = 0; return; }
+        boolean carouselDone = AdCarouselPolicy.isCompletion(boxes);
+        if (!adFlow.confirmReward() || (!AdPromptMatcher.hasReward(boxes) && !carouselDone)
                 || SystemClock.elapsedRealtime() - capturedAt > 5000) { rewardFrames = 0; return; }
         if (++rewardFrames < 2) return;
         List<AccessibilityNodeInfo> close = findExact(root, "点击退出关闭视频");
         if (close.size() != 1 || !close.get(0).isVisibleToUser()) return;
         Rect rect = new Rect(); close.get(0).getBoundsInScreen(rect);
         if (rect.isEmpty() || rect.left < image.getWidth() * 3 / 4 || rect.bottom > image.getHeight() / 4) return;
-        nextTask("广告显示已获得奖励，已尝试关闭；");
+        String reason = carouselDone ? "广告轮播已完成，已关闭广告；" : "广告显示已获得奖励，已尝试关闭；";
+        nextTask(reason);
         tap(rect.left, rect.top, rect.right, rect.bottom,
-                "广告显示已获得奖励，已尝试关闭；继续下一个任务。", "关闭广告被中断，请手动处理。");
+                reason + "继续下一个任务。", "关闭广告被中断，请手动处理。");
     }
     private void tap(int left, int top, int right, int bottom, String success, String failure) {
         Path path = new Path(); path.moveTo((left + right) / 2f, (top + bottom) / 2f);
@@ -738,10 +997,18 @@ public final class TaskService extends AccessibilityService {
         CharSequence pkg = event.getPackageName();
         if (pkg != null && pkg.length() > 0) {
             String next = pkg.toString();
+            if (isSystemOverlay(next)) {
+                // 通知栏/音量面板等系统浮层不是广告落地页，不能覆盖真正的应用前台记录。
+                Log.i("MarioAdDiag", "overlay=" + next + " cls=" + event.getClassName());
+                return;
+            }
             if (!next.equals(lastForegroundPkg))
                 Log.i("MarioAdDiag", "foreground=" + next + " cls=" + event.getClassName());
             lastForegroundPkg = next;
         }
+    }
+    private static boolean isSystemOverlay(String pkg) {
+        return "com.android.systemui".equals(pkg) || "miui.systemui.plugin".equals(pkg);
     }
     @Override public void onInterrupt() {
         // 该回调可能在手势跨应用窗口切换时由系统触发且不代表能力被收回；

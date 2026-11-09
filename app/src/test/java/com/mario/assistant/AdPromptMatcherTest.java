@@ -51,10 +51,17 @@ public class AdPromptMatcherTest {
         ReadingTaskLocator.Box offCenter = new ReadingTaskLocator.Box("查看详情", 40, 2130, 253, 2188);
         assertNull(AdPromptMatcher.findDetails(Arrays.asList(PROMPT, DISCLOSURE, offCenter), W, H));
     }
-    @Test public void refusesButtonsWithRealSideEffects() {
-        for (String label : new String[]{"立即下载", "安装应用", "去充值", "立即支付"}) {
+    @Test public void refusesInstallStyleButtons() {
+        for (String label : new String[]{"立即下载", "安装应用"}) {
             ReadingTaskLocator.Box denied = new ReadingTaskLocator.Box(label, 489, 2130, 702, 2188);
             assertNull(label, AdPromptMatcher.findDetails(Arrays.asList(PROMPT, DISCLOSURE, denied), W, H));
+        }
+    }
+    @Test public void allowsPaymentStyleCopyWithoutTextGating() {
+        // 按钮文案不参与安全判定：点击后仅打开落地页，项目在落地页内不做任何点击。
+        for (String label : new String[]{"立即支付", "去充值", "立即抢购"}) {
+            ReadingTaskLocator.Box pay = new ReadingTaskLocator.Box(label, 489, 2130, 702, 2188);
+            assertSame(label, pay, AdPromptMatcher.findDetails(Arrays.asList(PROMPT, DISCLOSURE, pay), W, H));
         }
     }
     @Test public void describeReportsPromptDisclosureAndLowerZoneTexts() {
@@ -80,9 +87,12 @@ public class AdPromptMatcherTest {
         // 按钮在广告标识下方时不匹配。
         ReadingTaskLocator.Box below = new ReadingTaskLocator.Box("查看详情", 497, 2440, 693, 2493);
         assertNull(AdPromptMatcher.findDetails(Arrays.asList(below, adMark), W, H));
-        // 兜底只接受已验证安全文案家族；“立即抢购”无披露行时仍拒绝。
+        // 真机实测（闲鱼素材视频播放态）：无披露行，“立即抢购”位于“广告”标识上方，点击仅进落地页。
         ReadingTaskLocator.Box buy = new ReadingTaskLocator.Box("立即抢购", 497, 2215, 693, 2268);
-        assertNull(AdPromptMatcher.findDetails(Arrays.asList(buy, adMark), W, H));
+        assertSame(buy, AdPromptMatcher.findDetails(Arrays.asList(buy, adMark), W, H));
+        // 仅拒绝安装类动作；支付类文案放行。
+        ReadingTaskLocator.Box install = new ReadingTaskLocator.Box("立即下载", 497, 2215, 693, 2268);
+        assertNull(AdPromptMatcher.findDetails(Arrays.asList(install, adMark), W, H));
         // 两个候选时放弃。
         ReadingTaskLocator.Box second = new ReadingTaskLocator.Box("去逛逛", 497, 2140, 693, 2193);
         assertNull(AdPromptMatcher.findDetails(Arrays.asList(second, action, adMark), W, H));
@@ -110,12 +120,12 @@ public class AdPromptMatcherTest {
         // 单字内部误读同样匹配。
         ReadingTaskLocator.Box inner = new ReadingTaskLocator.Box("查看详惰", 443, 2216, 694, 2267);
         assertSame(inner, AdPromptMatcher.findDetails(Arrays.asList(brand, copy, inner, adMark), W, H));
-        // 危险后缀长度超过 +1 容忍：仍然拒绝。
-        ReadingTaskLocator.Box danger = new ReadingTaskLocator.Box("查看详情并支付", 443, 2216, 694, 2267);
-        assertNull(AdPromptMatcher.findDetails(Arrays.asList(brand, copy, danger, adMark), W, H));
-        // 超过单字误读（两个字符不同）：拒绝。
-        ReadingTaskLocator.Box twoDiff = new ReadingTaskLocator.Box("查看详惰惰", 443, 2216, 694, 2267);
-        assertNull(AdPromptMatcher.findDetails(Arrays.asList(brand, copy, twoDiff, adMark), W, H));
+        // 文案后缀不参与判定：支付类文案同样放行（点击只打开落地页）。
+        ReadingTaskLocator.Box paymentCopy = new ReadingTaskLocator.Box("查看详情并支付", 443, 2216, 694, 2267);
+        assertSame(paymentCopy, AdPromptMatcher.findDetails(Arrays.asList(brand, copy, paymentCopy, adMark), W, H));
+        // 超出按钮几何带的素材文字不会被误选。
+        ReadingTaskLocator.Box farAbove = new ReadingTaskLocator.Box("查看详情", 443, 1985, 694, 2035);
+        assertNull(AdPromptMatcher.findDetails(Arrays.asList(brand, copy, farAbove, adMark), W, H));
     }
     @Test public void describeReportsVideoState() {
         ReadingTaskLocator.Box action = new ReadingTaskLocator.Box("查看详情", 497, 2215, 693, 2268);
