@@ -1,9 +1,7 @@
 package com.mario.assistant;
 
 import android.content.Context;
-import android.graphics.Bitmap;
 import android.graphics.Typeface;
-import android.graphics.drawable.BitmapDrawable;
 import android.graphics.drawable.Drawable;
 import android.graphics.drawable.StateListDrawable;
 import android.view.Gravity;
@@ -39,22 +37,6 @@ final class MarioTheme {
         return t;
     }
 
-    /** 方块斜面底图：黑描边 + 上左亮边 + 下右暗边，拉伸后即大像素斜面。 */
-    private static Bitmap blockBitmap(int face, int light, int dark, float darken) {
-        int s = 16;
-        Bitmap b = Bitmap.createBitmap(s, s, Bitmap.Config.ARGB_8888);
-        b.eraseColor(OUTLINE);
-        int f = shade(face, darken), l = shade(light, darken), d = shade(dark, darken);
-        for (int y = 1; y < s - 1; y++)
-            for (int x = 1; x < s - 1; x++)
-                b.setPixel(x, y, f);
-        for (int i = 2; i < s - 2; i++) {
-            b.setPixel(i, 1, l); b.setPixel(1, i, l);
-            b.setPixel(i, s - 2, d); b.setPixel(s - 2, i, d);
-        }
-        return b;
-    }
-
     static int shade(int color, float factor) {
         int r = Math.min(0xFF, (int) (((color >> 16) & 0xFF) * factor));
         int g = Math.min(0xFF, (int) (((color >> 8) & 0xFF) * factor));
@@ -66,15 +48,48 @@ final class MarioTheme {
     static Drawable blockButtonBg(Context c, int[] colors) {
         StateListDrawable sld = new StateListDrawable();
         sld.addState(new int[]{android.R.attr.state_pressed},
-                wrap(c, blockBitmap(colors[0], colors[1], colors[2], 0.62f)));
-        sld.addState(new int[0], wrap(c, blockBitmap(colors[0], colors[1], colors[2], 1f)));
+                new BlockDrawable(c, colors, 0.62f));
+        sld.addState(new int[0], new BlockDrawable(c, colors, 1f));
         return sld;
     }
 
-    private static BitmapDrawable wrap(Context c, Bitmap b) {
-        BitmapDrawable d = new BitmapDrawable(c.getResources(), b);
-        d.setFilterBitmap(false);
-        return d;
+    /** 按 dp 绘制的像素斜面方块：黑描边固定宽度，不随按钮宽度拉伸。 */
+    private static final class BlockDrawable extends Drawable {
+        private final int face, light, dark;
+        private final int border, bevel, cut;
+        private final android.graphics.Paint paint = new android.graphics.Paint();
+
+        BlockDrawable(Context c, int[] colors, float darken) {
+            face = shade(colors[0], darken);
+            light = shade(colors[1], darken);
+            dark = shade(colors[2], darken);
+            border = Math.max(1, dp(c, 2));
+            bevel = Math.max(2, dp(c, 3));
+            cut = border + Math.max(2, dp(c, 2));
+        }
+
+        @Override public void draw(android.graphics.Canvas canvas) {
+            android.graphics.Rect b = getBounds();
+            paint.setColor(OUTLINE);
+            canvas.drawRect(b, paint);
+            paint.setColor(face);
+            canvas.drawRect(b.left + border, b.top + border, b.right - border, b.bottom - border, paint);
+            paint.setColor(light);
+            canvas.drawRect(b.left + border, b.top + border, b.right - border, b.top + border + bevel, paint);
+            canvas.drawRect(b.left + border, b.top + border, b.left + border + bevel, b.bottom - border, paint);
+            paint.setColor(dark);
+            canvas.drawRect(b.left + border, b.bottom - border - bevel, b.right - border, b.bottom - border, paint);
+            canvas.drawRect(b.right - border - bevel, b.top + border, b.right - border, b.bottom - border, paint);
+            paint.setColor(SKY); // 四角切齐天空，形成像素圆角
+            canvas.drawRect(b.left, b.top, b.left + cut, b.top + cut, paint);
+            canvas.drawRect(b.right - cut, b.top, b.right, b.top + cut, paint);
+            canvas.drawRect(b.left, b.bottom - cut, b.left + cut, b.bottom, paint);
+            canvas.drawRect(b.right - cut, b.bottom - cut, b.right, b.bottom, paint);
+        }
+
+        @Override public void setAlpha(int alpha) { }
+        @Override public void setColorFilter(android.graphics.ColorFilter cf) { }
+        @Override public int getOpacity() { return android.graphics.PixelFormat.TRANSLUCENT; }
     }
 
     /** SMB 对话底板：白底黑框、像素圆角。按 dp 绘制，避免位图拉伸导致边框过粗。 */

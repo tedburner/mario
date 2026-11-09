@@ -1,6 +1,9 @@
 package com.mario.assistant;
 
 import android.accessibilityservice.AccessibilityServiceInfo;
+import android.animation.Animator;
+import android.animation.AnimatorListenerAdapter;
+import android.animation.ValueAnimator;
 import android.app.Activity;
 import android.app.AlertDialog;
 import android.app.AppOpsManager;
@@ -11,17 +14,22 @@ import android.graphics.Bitmap;
 import android.graphics.Shader;
 import android.graphics.drawable.BitmapDrawable;
 import android.os.Bundle;
+import android.os.Handler;
+import android.os.Looper;
 import android.os.PowerManager;
 import android.provider.Settings;
 import android.util.Log;
 import android.view.Gravity;
 import android.view.View;
 import android.view.accessibility.AccessibilityManager;
+import android.view.animation.LinearInterpolator;
 import android.widget.FrameLayout;
 import android.widget.ImageView;
 import android.widget.LinearLayout;
 import android.widget.ScrollView;
 import android.widget.TextView;
+import java.util.ArrayList;
+import java.util.List;
 import java.util.function.Consumer;
 
 /** 马里奥像素风主界面：游戏 HUD + 分组按钮 + SMB 对话底板运行结果。 */
@@ -31,6 +39,18 @@ public final class MainActivity extends Activity {
     private TextView hudRun;
     private TextView hudState;
     private TextView resultStatus;
+    private FrameLayout stage;
+    private ImageView hero;
+    private ImageView pickupCoin;
+    private ValueAnimator walker;
+    private ValueAnimator jump;
+    private float jumpLift;
+    private boolean resumed;
+    private final Handler ticker = new Handler(Looper.getMainLooper());
+    private final List<ImageView> skyCoins = new ArrayList<>();
+    private final List<Long> skyCoinPeriods = new ArrayList<>();
+    private final List<ValueAnimator> spins = new ArrayList<>();
+    private final Runnable coinAction = this::collectCoin;
 
     @Override public void onCreate(Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
@@ -91,6 +111,7 @@ public final class MainActivity extends Activity {
         root.addView(settings);
 
         root.addView(stacked(resultBox(), 18, 0));
+        root.addView(skyDecor());
 
         FrameLayout frame = new FrameLayout(this);
         frame.setBackgroundColor(MarioTheme.SKY);
@@ -120,6 +141,9 @@ public final class MainActivity extends Activity {
         addCloud(h, Gravity.TOP | Gravity.START, 10, 2, 30);
         addCloud(h, Gravity.TOP | Gravity.END, 30, 24, 38);
         addCloud(h, Gravity.TOP | Gravity.START, 160, 0, 22);
+        addSkyCoin(h, Gravity.TOP | Gravity.START, 300, 8, 13, 1500);
+        addSkyCoin(h, Gravity.TOP | Gravity.END, 108, 34, 11, 2100);
+        addSkyCoin(h, Gravity.TOP | Gravity.START, 34, 96, 12, 1800);
 
         LinearLayout inner = new LinearLayout(this);
         inner.setOrientation(LinearLayout.VERTICAL);
@@ -239,7 +263,7 @@ public final class MainActivity extends Activity {
         return box;
     }
 
-    /** 底部地面装饰：砖块地坪 + 马里奥 + 头顶金币（领金币主题）。 */
+    /** 底部地面装饰：砖块地坪 + 来回跑动的马里奥 + 头顶待拾取的金币。 */
     private View footer() {
         FrameLayout f = new FrameLayout(this);
         BitmapDrawable ground = new BitmapDrawable(getResources(),
@@ -250,20 +274,130 @@ public final class MainActivity extends Activity {
         groundView.setBackground(ground);
         f.addView(groundView, new FrameLayout.LayoutParams(-1, MarioTheme.dp(this, 22), Gravity.BOTTOM));
 
-        ImageView mario = new ImageView(this);
-        mario.setImageDrawable(PixelArt.sprite(this, Sprites.mario(), 34));
-        FrameLayout.LayoutParams mlp = new FrameLayout.LayoutParams(-2, -2, Gravity.BOTTOM | Gravity.END);
-        mlp.rightMargin = MarioTheme.dp(this, 56);
+        hero = new ImageView(this);
+        hero.setImageDrawable(PixelArt.sprite(this, Sprites.mario(), 34));
+        FrameLayout.LayoutParams mlp = new FrameLayout.LayoutParams(-2, -2, Gravity.BOTTOM | Gravity.START);
+        mlp.leftMargin = 0;
         mlp.bottomMargin = MarioTheme.dp(this, 20);
-        f.addView(mario, mlp);
+        f.addView(hero, mlp);
 
-        ImageView coin = new ImageView(this);
-        coin.setImageDrawable(PixelArt.sprite(this, Sprites.coin(), 18));
-        FrameLayout.LayoutParams clp = new FrameLayout.LayoutParams(-2, -2, Gravity.BOTTOM | Gravity.END);
-        clp.rightMargin = MarioTheme.dp(this, 64);
-        clp.bottomMargin = MarioTheme.dp(this, 58);
-        f.addView(coin, clp);
+        pickupCoin = new ImageView(this);
+        pickupCoin.setImageDrawable(PixelArt.sprite(this, Sprites.coin(), 14));
+        FrameLayout.LayoutParams plp = new FrameLayout.LayoutParams(-2, -2, Gravity.BOTTOM | Gravity.START);
+        plp.leftMargin = 0;
+        plp.bottomMargin = MarioTheme.dp(this, 54);
+        f.addView(pickupCoin, plp);
+        pickupCoin.setVisibility(View.INVISIBLE);
+
+        f.setClipChildren(false); // 起跳时头顶金币会越过 footer 上沿
+        stage = f;
         return f;
+    }
+
+    /** 内容下方的空天空：散布会转动的金币。 */
+    private View skyDecor() {
+        FrameLayout f = new FrameLayout(this);
+        f.setLayoutParams(new LinearLayout.LayoutParams(-1, MarioTheme.dp(this, 250)));
+        addSkyCoin(f, Gravity.TOP | Gravity.START, 42, 26, 14, 1500);
+        addSkyCoin(f, Gravity.TOP | Gravity.END, 72, 10, 12, 2100);
+        addSkyCoin(f, Gravity.TOP | Gravity.START, 252, 88, 13, 1800);
+        addSkyCoin(f, Gravity.TOP | Gravity.END, 168, 68, 11, 2400);
+        addSkyCoin(f, Gravity.TOP | Gravity.START, 150, 158, 12, 2000);
+        return f;
+    }
+
+    private void addSkyCoin(FrameLayout parent, int gravity, int marginDp, int topDp, float sizeDp, int periodMs) {
+        ImageView coin = new ImageView(this);
+        coin.setImageDrawable(PixelArt.sprite(this, Sprites.coin(), sizeDp));
+        FrameLayout.LayoutParams lp = new FrameLayout.LayoutParams(-2, -2, gravity);
+        if ((gravity & Gravity.START) != 0) lp.leftMargin = MarioTheme.dp(this, marginDp);
+        else lp.rightMargin = MarioTheme.dp(this, marginDp);
+        lp.topMargin = MarioTheme.dp(this, topDp);
+        parent.addView(coin, lp);
+        skyCoins.add(coin);
+        skyCoinPeriods.add((long) periodMs);
+    }
+
+    /** 马里奥从画面左侧跑到右侧，循环往返；途中不定期起跳收集头顶金币。 */
+    private void startAnimations() {
+        if (hero == null || stage == null) return;
+        stopAnimations();
+        hero.post(() -> {
+            if (!resumed || hero.getWidth() == 0) return;
+            ValueAnimator anim = ValueAnimator.ofFloat(0f, 1f);
+            anim.setDuration(12000);
+            anim.setRepeatCount(ValueAnimator.INFINITE);
+            anim.setInterpolator(new LinearInterpolator());
+            final int margin = MarioTheme.dp(this, 6);
+            anim.addUpdateListener(a -> {
+                float travel = Math.max(1f, stage.getWidth() - hero.getWidth() - margin * 2f);
+                float f = (float) a.getAnimatedValue();
+                hero.setTranslationX(margin + f * travel);
+                if (jumpLift == 0f) {
+                    float steps = f * travel / MarioTheme.dp(this, 10);
+                    hero.setTranslationY(-Math.abs((float) Math.sin(steps * Math.PI)) * MarioTheme.dp(this, 2));
+                } else {
+                    hero.setTranslationY(-jumpLift);
+                }
+                if (pickupCoin.getVisibility() == View.VISIBLE) {
+                    pickupCoin.setTranslationX(hero.getTranslationX()
+                            + (hero.getWidth() - pickupCoin.getWidth()) / 2f);
+                }
+            });
+            walker = anim;
+            anim.start();
+            ticker.postDelayed(coinAction, 2600);
+        });
+        for (int i = 0; i < skyCoins.size(); i++) {
+            final ImageView coin = skyCoins.get(i);
+            ValueAnimator spin = ValueAnimator.ofFloat(1f, 0.15f, 1f);
+            spin.setDuration(skyCoinPeriods.get(i));
+            spin.setStartDelay(i * 300L);
+            spin.setRepeatCount(ValueAnimator.INFINITE);
+            spin.setInterpolator(new LinearInterpolator());
+            spin.addUpdateListener(a -> coin.setScaleX((float) a.getAnimatedValue()));
+            spin.start();
+            spins.add(spin);
+        }
+    }
+
+    private void collectCoin() {
+        if (hero == null || pickupCoin == null || walker == null) return;
+        if (jump != null && jump.isRunning()) return;
+        pickupCoin.setAlpha(1f);
+        pickupCoin.setVisibility(View.VISIBLE);
+        ValueAnimator anim = ValueAnimator.ofFloat(0f, 1f);
+        anim.setDuration(700);
+        final float hop = MarioTheme.dp(this, 24);
+        anim.addUpdateListener(a -> {
+            float t = (float) a.getAnimatedValue();
+            jumpLift = (float) Math.sin(t * Math.PI) * hop;
+            pickupCoin.setTranslationX(hero.getTranslationX()
+                    + (hero.getWidth() - pickupCoin.getWidth()) / 2f);
+            pickupCoin.setTranslationY(-jumpLift - t * MarioTheme.dp(this, 16));
+            pickupCoin.setAlpha(t < 0.7f ? 1f : Math.max(0f, (1f - t) / 0.3f));
+        });
+        anim.addListener(new AnimatorListenerAdapter() {
+            @Override public void onAnimationEnd(Animator a) {
+                jumpLift = 0f;
+                pickupCoin.setVisibility(View.INVISIBLE);
+                if (walker != null) {
+                    ticker.postDelayed(coinAction, 3600 + (long) (Math.random() * 2600));
+                }
+            }
+        });
+        jump = anim;
+        anim.start();
+    }
+
+    private void stopAnimations() {
+        ticker.removeCallbacks(coinAction);
+        if (walker != null) { walker.cancel(); walker = null; }
+        if (jump != null) { jump.cancel(); jump = null; }
+        jumpLift = 0f;
+        for (ValueAnimator spin : spins) spin.cancel();
+        spins.clear();
+        if (pickupCoin != null) pickupCoin.setVisibility(View.INVISIBLE);
     }
 
     private View stacked(View child, int topMarginDp, int bottomMarginDp) {
@@ -395,6 +529,14 @@ public final class MainActivity extends Activity {
 
     @Override protected void onResume() {
         super.onResume();
+        resumed = true;
         refreshAll(accessibilityEnabled());
+        startAnimations();
+    }
+
+    @Override protected void onPause() {
+        super.onPause();
+        resumed = false;
+        stopAnimations();
     }
 }
