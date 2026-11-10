@@ -118,4 +118,80 @@ public class ForestTaskParserTest {
         assertEquals(ForestTask.Kind.BROWSE, tasks.get(0).kind);
         assertEquals(ForestTaskPolicy.ALIPAY, tasks.get(0).targetPackage);
     }
+
+    /** 真机 2026-11-10：奖励页顶部还有里程碑和「活力值去兑换」，它们不能当任务行点。 */
+    @Test public void ignoresNodesAboveTaskProgressHeader() {
+        List<UiNode> nodes = new ArrayList<>();
+        nodes.add(n(0, "任务进度:", 71, 930, 250, 990));
+        nodes.add(n(1, "12", 250, 930, 300, 990));
+        nodes.add(n(2, "+40g立即领取", 440, 880, 620, 940));
+        nodes.add(n(3, "我的活力值", 71, 460, 370, 520));
+        nodes.add(n(4, "去兑换", 71, 560, 200, 620));
+        nodes.add(n(5, "去守护古树得奖励", 282, 1979, 799, 2060));
+        nodes.add(n(6, "去守护", 838, 1979, 1101, 2060));
+        nodes.add(n(7, "+10g", 916, 1963, 1108, 2005));
+        List<ForestTask> tasks = ForestTaskParser.parse(nodes, 1200, 2670, INSTALLED);
+        assertEquals(1, tasks.size());
+        assertEquals("去守护古树得奖励", tasks.get(0).title);
+        assertEquals(ForestTask.Kind.BROWSE, tasks.get(0).kind);
+    }
+
+    /** 真机 2026-11-10 16:26：任务做满后「任务进度」变成「明天再来」，头部横幅被当成任务行点了。 */
+    @Test public void headerBannerIsNotTaskAfterProgressBecomesTomorrow() {
+        List<UiNode> nodes = new ArrayList<>();
+        nodes.add(n(0, "今日累计奖励", 71, 900, 400, 1010));
+        nodes.add(n(1, "明天再来", 71, 1000, 260, 1040));
+        nodes.add(n(2, "我的活力值", 71, 500, 370, 560));
+        nodes.add(n(3, "去看看", 1000, 500, 1150, 560));
+        nodes.add(n(4, "2人每日得能量翻倍卡", 300, 380, 900, 440));
+        nodes.add(n(5, "去看看", 1000, 380, 1150, 440));
+        nodes.add(n(6, "登录灵光识别得能量", 282, 1330, 799, 1400));
+        nodes.add(n(7, "去完成", 838, 1330, 1101, 1400));
+        nodes.add(n(8, "+100g", 916, 1270, 1108, 1313));
+        List<ForestTask> tasks = ForestTaskParser.parse(nodes, 1200, 2670, INSTALLED);
+        assertEquals(1, tasks.size());
+        assertEquals("登录灵光识别得能量", tasks.get(0).title);
+    }
+
+    /** 「明天再来」+ 里程碑都在、但「任务进度」已消失时，仍要挡住顶部横幅。 */
+    @Test public void milestoneRowBoundsTaskListWhenProgressIsGone() {
+        List<UiNode> nodes = new ArrayList<>();
+        nodes.add(n(0, "明天再来", 71, 1000, 260, 1040));
+        nodes.add(n(1, "+40g已领取", 440, 880, 620, 940));
+        nodes.add(n(2, "2人每日得能量翻倍卡", 300, 380, 900, 440));
+        nodes.add(n(3, "去看看", 1000, 380, 1150, 440));
+        nodes.add(n(4, "去组队种树得森林周边", 282, 1330, 799, 1400));
+        nodes.add(n(5, "立即领取", 838, 1330, 1101, 1400));
+        nodes.add(n(6, "+10g", 916, 1270, 1108, 1313));
+        List<ForestTask> tasks = ForestTaskParser.parse(nodes, 1200, 2670, INSTALLED);
+        assertEquals(1, tasks.size());
+        assertEquals("去组队种树得森林周边", tasks.get(0).title);
+    }
+
+    /** 真机 2026-11-10 16:32 滚动后行错位，抓到了「g」「--」这种碎片当标题。 */
+    @Test public void ignoresFragmentTitlesFromScrollMisalignment() {
+        List<UiNode> nodes = new ArrayList<>();
+        nodes.add(n(0, "g", 282, 1500, 300, 1560));
+        nodes.add(n(1, "去看看", 838, 1500, 1101, 1560));
+        nodes.add(n(2, "--", 282, 1700, 320, 1760));
+        nodes.add(n(3, "去看看", 838, 1700, 1101, 1760));
+        nodes.add(n(4, "逛森林集市得能量", 282, 1900, 799, 1960));
+        nodes.add(n(5, "去看看", 838, 1900, 1101, 1960));
+        List<ForestTask> tasks = ForestTaskParser.parse(nodes, 1200, 2670, INSTALLED);
+        assertEquals(1, tasks.size());
+        assertEquals("逛森林集市得能量", tasks.get(0).title);
+    }
+
+    /** 真机 2026-11-10：玩一玩森林乐消消 的按钮是「去抽奖」，之前整行解析不出来，所以从来不去抽奖。 */
+    @Test public void parsesDrawRowAsDrawKind() {
+        List<UiNode> nodes = new ArrayList<>();
+        nodes.add(n(0, "任务进度:", 71, 930, 250, 990));
+        nodes.add(n(1, "玩一玩森林乐消消", 282, 1748, 799, 1829));
+        nodes.add(n(2, "去抽奖", 838, 1748, 1101, 1829));
+        nodes.add(n(3, "x1", 916, 1732, 1108, 1774));
+        List<ForestTask> tasks = ForestTaskParser.parse(nodes, 1200, 2670, INSTALLED);
+        assertEquals(1, tasks.size());
+        assertEquals(ForestTask.Kind.DRAW, tasks.get(0).kind);
+        assertTrue(tasks.get(0).actionable());
+    }
 }

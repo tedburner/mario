@@ -9,7 +9,7 @@ public final class ForestTaskPolicy {
     public static final String ALIPAY = "com.eg.android.AlipayGphone";
 
     private static final String[] SKIP_TITLE_KEYWORDS = {
-            "保障", "保险", "投保", "受益", "借款", "贷款", "信用卡", "开户",
+            "保障", "借款", "贷款", "信用卡", "开户",
             "缴费", "地铁", "ETC", "火车票", "还款", "充值", "转账", "身份证", "银行卡",
             "践行绿色行为"
     };
@@ -38,9 +38,6 @@ public final class ForestTaskPolicy {
             {"腾讯视频", "com.tencent.qqlive"},
             {"夸克", "com.quark.browser"}
     };
-    private static final String[] CLAIM_CTAS = {"去领取", "立即领取", "领取", "签到"};
-    private static final String[] DONE_CTAS = {"今日完成", "已领取", "已完成", "已领", "领完"};
-
     public static final class Decision {
         public final ForestTask.Kind kind;
         public final String targetPackage;
@@ -58,7 +55,13 @@ public final class ForestTaskPolicy {
     public static Decision decide(String title, String cta, String detail, Installed installed) {
         String t = normalize(title);
         String c = normalize(cta);
-        if (isDone(c)) return new Decision(ForestTask.Kind.DONE, null, false, "已完成");
+        CtaClassifier.Action action = CtaClassifier.classify(c);
+        if (action == CtaClassifier.Action.DONE) {
+            return new Decision(ForestTask.Kind.DONE, null, false, "已完成");
+        }
+        if (action == CtaClassifier.Action.REJECT) {
+            return skip("交易/安装类入口：" + c);
+        }
         if (containsAny(t, SKIP_TITLE_KEYWORDS)) {
             return skip("标题命中跳过规则");
         }
@@ -69,11 +72,18 @@ public final class ForestTaskPolicy {
         if (t.contains("通过1关") || t.contains("过一关") || t.contains("闯关")) {
             return skip("需完成关卡");
         }
-        if ("去完成".equals(c)) {
-            // 当前真机上的“去完成”均为填写保障类表单；无更明确的动作描述时宁可跳过。
-            return skip("「去完成」默认跳过");
+        if (action == CtaClassifier.Action.NONE) {
+            return skip("未识别的按钮文案：" + c);
         }
-        ForestTask.Kind kind = containsAny(c, CLAIM_CTAS) ? ForestTask.Kind.CLAIM : ForestTask.Kind.BROWSE;
+        ForestTask.Kind kind;
+        if (action == CtaClassifier.Action.CLAIM) {
+            kind = ForestTask.Kind.CLAIM;
+        } else if (action == CtaClassifier.Action.DRAW) {
+            kind = ForestTask.Kind.DRAW;
+        } else {
+            // 「去完成」「去守护」「去逛集市」等一律按浏览执行：只进页面停留，落地页内不做任何点击。
+            kind = ForestTask.Kind.BROWSE;
+        }
         String pkg = packageFor(t);
         if (pkg == null && containsAny(t, INTERNAL_KEYWORDS)) pkg = ALIPAY;
         if (pkg != null) {
@@ -81,11 +91,6 @@ public final class ForestTaskPolicy {
             return new Decision(kind, pkg, false, "已映射 " + pkg);
         }
         return new Decision(kind, null, true, "未知第三方，点开观察");
-    }
-
-    private static boolean isDone(String cta) {
-        if (cta.startsWith("已")) return true;
-        return containsAny(cta, DONE_CTAS);
     }
 
     private static String packageFor(String title) {

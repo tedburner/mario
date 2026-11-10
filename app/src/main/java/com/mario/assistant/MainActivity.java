@@ -84,6 +84,8 @@ public final class MainActivity extends Activity {
                 "未找到起点读书。", "com.qidian.QDReader", true, TaskService::inspectReading), 0, 10));
         root.addView(stacked(runButton("森林任务", Sprites.mushroom(), MarioTheme.PIPE,
                 "未找到支付宝。", "com.eg.android.AlipayGphone", false, TaskService::arm), 0, 10));
+        root.addView(stacked(runButton("森林能量", Sprites.leaf(), MarioTheme.PIPE,
+                "未找到支付宝。", "com.eg.android.AlipayGphone", false, TaskService::armEnergy), 0, 10));
         TextView stop = MarioTheme.button(this, "停止运行",
                 PixelArt.sprite(this, Sprites.bomb(), 24), MarioTheme.DANGER, 17, 54);
         stop.setOnClickListener(v -> {

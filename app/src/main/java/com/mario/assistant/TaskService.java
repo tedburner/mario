@@ -2,6 +2,7 @@ package com.mario.assistant;
 
 import com.mario.assistant.application.RunCoordinator;
 import com.mario.assistant.application.RunHost;
+import com.mario.assistant.application.forest.ForestEnergyRunner;
 import com.mario.assistant.application.forest.ForestTaskRunner;
 import com.mario.assistant.application.welfare.WelfareTaskRunner;
 
@@ -67,6 +68,11 @@ public final class TaskService extends AccessibilityService implements RunHost {
     void arm() {
         if (scanHandler == null || coordinator == null) { save("识别线程未就绪，请稍后重试。"); return; }
         scanHandler.post(() -> coordinator.start(new ForestTaskRunner(ForestTaskRunner.Mode.NORMAL)));
+    }
+    /** 森林能量：收自己树上/边上的气泡，再逐个好友「一键收」。 */
+    void armEnergy() {
+        if (scanHandler == null || coordinator == null) { save("识别线程未就绪，请稍后重试。"); return; }
+        scanHandler.post(() -> coordinator.start(new ForestEnergyRunner()));
     }
     void inspectReading() {
         if (scanHandler == null || coordinator == null) { save("识别线程未就绪，请稍后重试。"); return; }

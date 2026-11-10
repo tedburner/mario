@@ -5,16 +5,17 @@ import com.mario.assistant.application.ActionGate;
 import com.mario.assistant.application.RunHost;
 import com.mario.assistant.application.RunToken;
 import com.mario.assistant.application.TaskRunner;
+import com.mario.assistant.domain.forest.ForestMilestone;
 import com.mario.assistant.domain.forest.ForestTask;
 import com.mario.assistant.domain.forest.ForestTaskParser;
+import com.mario.assistant.domain.forest.ForestTaskProgress;
 import com.mario.assistant.domain.model.Bounds;
 import com.mario.assistant.domain.model.TextBlock;
+import com.mario.assistant.domain.model.UiNode;
 import com.mario.assistant.domain.safety.ActionGuard;
 import com.mario.assistant.infrastructure.a11y.UiTree;
 import com.mario.assistant.infrastructure.system.DeviceEnvironment;
-import java.util.HashSet;
 import java.util.List;
-import java.util.Set;
 
 /** 蚂蚁森林奖励页任务：动态解析任务行，逐个浏览/领取并自动回到奖励页。 */
 public final class ForestTaskRunner implements TaskRunner {
@@ -22,6 +23,14 @@ public final class ForestTaskRunner implements TaskRunner {
 
     private static final String ALIPAY = DeviceEnvironment.ALIPAY;
     private static final long BROWSE_GRACE_MS = 2000;
+    /**
+     * 安全网：只在奖励页不断生成新任务（如双 11 会场轮换行）时兜底。
+     * 正常收尾靠「没有可执行任务 + 页面稳定 + 滑到底」，不靠次数。
+     */
+    private static final int MAX_ATTEMPTS = 100;
+    /** 里程碑最多点这么多次，防止按钮文案不变时死循环。 */
+    private static final int MAX_MILESTONE_TAPS = 6;
+    private static final long MILESTONE_SETTLE_MS = 2000;
 
     private final Mode mode;
     private RunHost host;
@@ -52,14 +61,17 @@ public final class ForestTaskRunner implements TaskRunner {
     private int lotteryAttempts;
     private int browseSeconds;
     private int tapLeft, tapTop, tapRight, tapBottom;
-    private int doneCount;
     private int attempts;
     private int scrolls;
     private int emptyScans;
+    private int milestoneTaps;
+    private long milestoneAt;
+    private boolean drawMode;
+    private int offRewardScans;
     private String lastSignature;
     private String priorKey;
-    private final Set<String> tried = new HashSet<>();
-    private final Set<String> claimed = new HashSet<>();
+    private boolean lastClickWasClaim;
+    private final ForestTaskProgress progress = new ForestTaskProgress();
 
     public ForestTaskRunner(Mode mode) {
         this.mode = mode;
@@ -105,7 +117,7 @@ public final class ForestTaskRunner implements TaskRunner {
     @Override public void onTick(long now) {
         if (finished || !token.isCurrent()) return;
         if (now >= deadline) {
-            stop("森林任务超时停止；已确认完成 " + doneCount + " 项。");
+            stop("森林任务超时停止；" + progress.summary() + "。");
             return;
         }
         try {
@@ -132,42 +144,82 @@ public final class ForestTaskRunner implements TaskRunner {
             log("森林：等待支付宝前台（当前 " + (tree.packageName.isEmpty() ? "未知" : tree.packageName) + "）。");
             return;
         }
-        if (!isRewardPage(tree)) { log("森林：请停留在蚂蚁森林-奖励页。"); return; }
+        if (!isRewardPage(tree)) {
+            // 停在森林主页/内页时不能一直刷「请停留」直到超时，主动去点「领奖」重开弹窗
+            if (++offRewardScans >= 5) {
+                offRewardScans = 0;
+                beginRecover(now);
+                log("森林：连续未识别到奖励弹窗，正在重新打开。");
+            } else {
+                log("森林：请停留在蚂蚁森林-奖励页。");
+            }
+            return;
+        }
+        offRewardScans = 0;
         if (dismissForestDialog(tree)) return;
         if (dismissForestBlocker(tree)) return;
+        if (tree.hasText("立即抽奖") || tree.hasText("收下奖励")) {
+            stage = 3;
+            stageAt = now;
+            lotteryStep = 0;
+            lotteryAttempts = 0;
+            log("森林：奖励页上出现抽奖弹窗，先处理抽奖。");
+            return;
+        }
+        if (claimMilestone(tree, now)) return;
         List<ForestTask> tasks = ForestTaskParser.parse(tree.nodes, tree.width, tree.height,
                 host.env()::isInstalled);
         log("forest tasks=" + ForestTaskParser.describe(tasks));
+        // 之前判过「浏览后仍可点」或「行已消失」的任务，一旦行上出现领取/抽奖入口，就该重新做一次
+        for (ForestTask task : tasks) {
+            if (task.kind != ForestTask.Kind.CLAIM && task.kind != ForestTask.Kind.DRAW) continue;
+            if (!progress.isSettled(task.title)) continue;
+            if (progress.claimFailures(task.title) >= ForestTaskProgress.MAX_CLAIM_FAILURES) continue;
+            progress.clearSettled(task.title);
+            log("森林：「" + task.title + "」已出现「" + task.cta + "」，重新纳入执行。");
+        }
         if (taskTitle != null) {
-            ForestTask same = findTask(tasks, taskTitle);
             String title = taskTitle;
-            if (same == null || !same.actionable()) {
-                doneCount++;
+            ForestTask same = findTask(tasks, title);
+            boolean stillActionable = same != null && same.actionable();
+            if (!stillActionable) {
+                progress.markDone(title);
                 log("「" + title + "」已完成，继续下一个任务。");
-            } else if (same.kind == ForestTask.Kind.CLAIM && claimed.add(title)) {
-                // 逛完任务会变成「立即领取」，此时才能拿到能量，需再点一次
-                tried.remove(title);
-                log("「" + title + "」已可领取，正在领取奖励。");
+            } else if (lastClickWasClaim) {
+                // 点过领取但行还是可点：重试有限次，超限如实记为「未确认」，不再空转
+                int failures = progress.recordClaimFailure(title);
+                if (progress.canRetryClaim(title)) {
+                    log("「" + title + "」领取后仍可点击，准备重试（第 " + failures + " 次）。");
+                } else {
+                    progress.markStuck(title);
+                    log("「" + title + "」领取 " + failures + " 次仍可点击，已跳过，收尾时列出。");
+                }
+            } else if (same.kind == ForestTask.Kind.CLAIM || same.kind == ForestTask.Kind.DRAW) {
+                // 浏览任务完成后行会变成「立即领取」或「去抽奖」，这一跳是正常后续动作，不算失败
+                log("「" + title + "」已变成「" + same.cta + "」，继续执行后续动作。");
             } else {
-                log("「" + title + "」返回后仍可点击，未确认完成，已跳过。");
+                progress.markStuck(title);
+                log("「" + title + "」浏览后仍可点击，未确认完成，已跳过。");
             }
             taskTitle = null;
             claimMode = false;
+            lastClickWasClaim = false;
         }
-        if (attempts >= 18) {
-            stop("森林：已点击 " + attempts + " 项任务，达到本轮上限；请核对奖励。");
+        if (attempts >= MAX_ATTEMPTS) {
+            stop("森林：已点击 " + attempts + " 次，达到 " + MAX_ATTEMPTS + " 次安全网上限；"
+                    + progress.summary() + "。");
             return;
         }
         ForestTask next = null;
         for (ForestTask task : tasks) {
-            if (task.actionable() && !tried.contains(task.title)) { next = task; break; }
+            if (task.actionable() && !progress.isSettled(task.title)) { next = task; break; }
         }
         if (next == null) {
             String signature = signature(tasks);
             if (signature.equals(lastSignature)) {
                 if (++emptyScans >= 2) {
-                    stop("森林：奖励页没有更多可执行任务；已确认完成 " + doneCount
-                            + " 项，点击 " + attempts + " 项。");
+                    stop("森林：奖励页没有更多可执行任务；" + progress.summary() + "，共点击 "
+                            + attempts + " 次。");
                     return;
                 }
             } else {
@@ -175,8 +227,8 @@ public final class ForestTaskRunner implements TaskRunner {
                 lastSignature = signature;
             }
             if (scrolls >= 8) {
-                stop("森林：已滑到奖励页底部；已确认完成 " + doneCount
-                        + " 项，点击 " + attempts + " 项。");
+                stop("森林：已滑到奖励页底部；" + progress.summary() + "，共点击 "
+                        + attempts + " 次。");
                 return;
             }
             scrolls++;
@@ -194,22 +246,23 @@ public final class ForestTaskRunner implements TaskRunner {
         }
         AccessibilityNodeInfo node = tree.live(next.ctaId);
         if (node == null) {
-            tried.add(next.title);
+            progress.markStuck(next.title);
             log("森林：「" + next.title + "」节点已失效，已跳过。");
             return;
         }
         if (!allow(ActionGuard.Surface.TASK_ROW, next.cta)) {
-            tried.add(next.title);
+            progress.markStuck(next.title);
             log("森林：「" + next.title + "」被安全策略拒绝，已跳过。");
             return;
         }
-        tried.add(next.title);
         attempts++;
         taskTitle = next.title;
         taskCta = next.cta;
         targetPackage = next.targetPackage;
         observeThirdParty = next.observeThirdParty;
         claimMode = next.kind == ForestTask.Kind.CLAIM;
+        drawMode = next.kind == ForestTask.Kind.DRAW;
+        lastClickWasClaim = claimMode;
         browseSeconds = next.browseSeconds();
         tapLeft = next.left;
         tapTop = next.top;
@@ -228,6 +281,24 @@ public final class ForestTaskRunner implements TaskRunner {
         log("森林：已点击「" + next.title + "」，等待页面跳转。");
     }
 
+    /**
+     * 「今日累计奖励」里程碑（+40g/+60g/+100g）先领掉。
+     * 它们不是独立的任务行，也不会因为任务做满就自动入账，必须点一次。
+     */
+    private boolean claimMilestone(UiTree tree, long now) {
+        if (milestoneTaps >= MAX_MILESTONE_TAPS) return false;
+        if (now - milestoneAt < MILESTONE_SETTLE_MS) return true;
+        List<UiNode> pending = ForestMilestone.claimable(tree.nodes);
+        if (pending.isEmpty()) return false;
+        UiNode target = pending.get(0);
+        if (!allow(ActionGuard.Surface.TASK_ROW, "立即领取")) return false;
+        milestoneTaps++;
+        milestoneAt = now;
+        log("森林：发现未领取的里程碑奖励「" + target.text + "」，正在领取。");
+        tapForest(target.left, target.top, target.right, target.bottom);
+        return true;
+    }
+
     /** 点击后观察前台：应用商店/下载页立即返回并跳过；第三方或支付宝内页停留浏览时长再返回。 */
     private void observeAfterTap(long now) {
         long elapsed = now - stageAt;
@@ -237,6 +308,30 @@ public final class ForestTaskRunner implements TaskRunner {
         boolean rewardPage = ALIPAY.equals(pkg) && tree.root != null && isRewardPage(tree);
         log("forest observe task=" + taskTitle + " target=" + targetPackage
                 + " observe=" + observeThirdParty + " pkg=" + pkg + " elapsed=" + elapsed);
+        if (drawMode) {
+            if (elapsed < 2200) return;
+            if (ALIPAY.equals(pkg) || pkg.isEmpty()) {
+                drawMode = false;
+                claimMode = false;
+                stage = 3;
+                stageAt = now;
+                lotteryStep = 0;
+                lotteryAttempts = 0;
+                log("森林：「" + taskTitle + "」已点开抽奖，正在识别抽奖页。");
+                return;
+            }
+            if (elapsed >= browseSeconds * 1000L + BROWSE_GRACE_MS) {
+                if (host.env().back() || tapMiniAppClose()) {
+                    drawMode = false;
+                    beginReturn(now);
+                    log("森林：抽奖拉到「" + pkg + "」，已返回奖励页继续。");
+                } else {
+                    drawMode = false;
+                    beginRecover(now);
+                }
+            }
+            return;
+        }
         if (claimMode) {
             // 领取后可能进入抽奖页：交给 OCR 分支识别「立即抽奖→收下奖励」
             if (elapsed < 2500) return;
@@ -282,11 +377,12 @@ public final class ForestTaskRunner implements TaskRunner {
                 return;
             }
             if (elapsed >= browseSeconds * 1000L + BROWSE_GRACE_MS) {
-                if (host.env().back()) {
+                if (host.env().back() || tapMiniAppClose()) {
                     beginReturn(now);
                     log("森林：已在支付宝任务页停留 " + browseSeconds + " 秒，正在返回奖励页。");
                 } else {
-                    stop("森林：无法返回奖励页，请手动返回。");
+                    beginRecover(now);
+                    log("森林：任务页无法返回，正在重新打开奖励页。");
                 }
                 return;
             }
@@ -294,11 +390,12 @@ public final class ForestTaskRunner implements TaskRunner {
             return;
         }
         if (elapsed >= browseSeconds * 1000L + BROWSE_GRACE_MS) {
-            if (host.env().back()) {
+            if (host.env().back() || tapMiniAppClose()) {
                 beginReturn(now);
                 log("森林：已在「" + pkg + "」停留 " + browseSeconds + " 秒，正在返回。");
             } else {
-                stop("森林：无法从第三方应用返回，请手动切回支付宝。");
+                beginRecover(now);
+                log("森林：无法从「" + pkg + "」返回，正在重新打开支付宝。");
             }
         }
     }
@@ -434,7 +531,8 @@ public final class ForestTaskRunner implements TaskRunner {
                     log("森林：已自动回到奖励页，继续查找任务。");
                     return;
                 }
-                TextBlock entry = findOcr(boxes, "领奖励");
+                // 主页上的入口文案是「领奖」，奖励弹窗里才是「领奖励」；用「领奖」兼容两者
+                TextBlock entry = findOcr(boxes, "领奖");
                 if (entry != null && allow(ActionGuard.Surface.NAVIGATION, entry.text)) {
                     recoverStep = 2;
                     stageAt = at;
@@ -536,8 +634,16 @@ public final class ForestTaskRunner implements TaskRunner {
             }
             return;
         }
-        if (lotteryStep == 0 && lotteryAttempts >= 5 && elapsed > 10000) {
-            stop("森林：领取后页面无法识别，已暂停；请手动处理「" + taskTitle + "」。");
+        if (lotteryStep == 0 && lotteryAttempts >= 5 && elapsed > 12000) {
+            // 抽奖页认不出来时不能整轮停掉：记一次失败，退回奖励页继续做其他任务。
+            int fails = progress.recordClaimFailure(taskTitle);
+            if (fails >= ForestTaskProgress.MAX_CLAIM_FAILURES) {
+                progress.markStuck(taskTitle);
+                log("森林：「" + taskTitle + "」抽奖页 " + fails + " 次无法识别，已跳过。");
+            } else {
+                log("森林：「" + taskTitle + "」抽奖页无法识别，正在返回奖励页重试。");
+            }
+            beginRecover(now);
             return;
         }
         lotteryAttempts++;
@@ -686,11 +792,13 @@ public final class ForestTaskRunner implements TaskRunner {
         return findOcr(boxes, needle) != null;
     }
 
+    /**
+     * 奖励弹窗的强特征。不能拿「立即领取」「去看看」判断——森林主页上也有这些字样，
+     * 会把主页误认成奖励页，然后卡在「请停留在奖励页」直到超时。
+     */
     private static boolean isForestSheetOcr(List<TextBlock> boxes) {
-        return hasOcr(boxes, "今日累计奖励") || hasOcr(boxes, "任务进度") || hasOcr(boxes, "更多任务")
-                || hasOcr(boxes, "立即领取") || hasOcr(boxes, "去看看") || hasOcr(boxes, "逛一逛")
-                || hasOcr(boxes, "去完成") || hasOcr(boxes, "今日完成") || hasOcr(boxes, "去参加")
-                || hasOcr(boxes, "去践行") || hasOcr(boxes, "一键浇水");
+        return hasOcr(boxes, "今日累计奖励") || hasOcr(boxes, "任务进度")
+                || hasOcr(boxes, "更多任务") || hasOcr(boxes, "关闭奖励弹窗");
     }
 
     private static TextBlock findOcr(List<TextBlock> boxes, String needle) {

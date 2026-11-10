@@ -77,8 +77,51 @@ public class ForestTaskPolicyTest {
                 "通过1关一步两步可得2次机会", "马上玩", "", INSTALLED).kind);
     }
 
-    @Test public void goCompleteIsSkippedByDefault() {
+    /**
+     * 真机 2026-11-10 出现「车险双11查报价抽大奖」「西湖益联保启动参保」。
+     * 口径：只要点进去只是浏览、不产生支付/下单，就允许执行（落地页内不做任何点击）。
+     */
+    @Test public void browseOnlyInsuranceTopicsAreAllowed() {
+        assertEquals(ForestTask.Kind.BROWSE, ForestTaskPolicy.decide(
+                "车险双11查报价抽大奖", "去看看", "", INSTALLED).kind);
+        assertEquals(ForestTask.Kind.BROWSE, ForestTaskPolicy.decide(
+                "西湖益联保启动参保", "去看看", "", INSTALLED).kind);
+        assertEquals(ForestTask.Kind.BROWSE, ForestTaskPolicy.decide(
+                "车险双11查报价抽大奖", "去完成", "", INSTALLED).kind);
+    }
+
+    /** 「去完成」不再一律跳过：落地页只停留浏览，不点任何按钮。 */
+    @Test public void goCompleteIsBrowsed() {
+        assertEquals(ForestTask.Kind.BROWSE, ForestTaskPolicy.decide(
+                "登录灵光识别得能量", "去完成", "", INSTALLED).kind);
+    }
+
+    /** 真机 2026-11-10 奖励页：玩一玩森林乐消消 的按钮是「去抽奖」，之前整行解析不出来。 */
+    @Test public void drawCtaIsDrawKind() {
+        assertEquals(ForestTask.Kind.DRAW, ForestTaskPolicy.decide(
+                "玩一玩森林乐消消", "去抽奖", "x1", INSTALLED).kind);
+        assertEquals(ForestTask.Kind.DRAW, ForestTaskPolicy.decide(
+                "森林寻宝", "立即抽奖", "", INSTALLED).kind);
+        assertTrue(ForestTaskPolicy.decide(
+                "玩一玩森林乐消消", "去抽奖", "x1", INSTALLED).kind
+                == ForestTask.Kind.DRAW);
+    }
+
+    /** 真机 2026-11-10 奖励页：去守护古树得奖励 的按钮是「去守护」。 */
+    @Test public void guardAndMarketCtasAreBrowsed() {
+        assertEquals(ForestTask.Kind.BROWSE, ForestTaskPolicy.decide(
+                "去守护古树得奖励", "去守护", "+10g", INSTALLED).kind);
+        assertEquals(ForestTask.Kind.BROWSE, ForestTaskPolicy.decide(
+                "逛蚂蚁森林集市得能量", "去逛逛", "", INSTALLED).kind);
+        assertEquals(ForestTask.Kind.BROWSE, ForestTaskPolicy.decide(
+                "逛蚂蚁森林集市得能量", "去逛集市", "", INSTALLED).kind);
+    }
+
+    /** 下单/支付类入口即使标题看着正常也不做。 */
+    @Test public void transactionCtaIsSkipped() {
         assertEquals(ForestTask.Kind.SKIP, ForestTaskPolicy.decide(
-                "某个未识别任务", "去完成", "", INSTALLED).kind);
+                "去旧衣回收,领一棵梭梭", "去下单", "+30g", INSTALLED).kind);
+        assertEquals(ForestTask.Kind.SKIP, ForestTaskPolicy.decide(
+                "逛会场领红包", "去购买", "", INSTALLED).kind);
     }
 }

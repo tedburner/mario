@@ -94,6 +94,24 @@ final class Sprites {
             ".wwwwwwwwwwww.",
     };
 
+    private static final Map<Character, Integer> LEAF_PAL = PixelArt.palette(
+            new char[]{'g', 'k'},
+            new int[]{0xFF4CD964, 0xFF1B5E20});
+    private static final String[] LEAF = {
+            "........kk..",
+            ".......kggk.",
+            "......kgggk.",
+            ".....kgggk..",
+            "....kgggk...",
+            "...kgggk....",
+            "..kgggk.....",
+            ".kgggk......",
+            ".kggk.......",
+            "..kk........",
+            "............",
+            "............",
+    };
+
     private static final String[] QMARK = {
             "..wwww..",
             ".wwwwww.",
@@ -123,6 +141,8 @@ final class Sprites {
     static Bitmap mario() { return PixelArt.render(MARIO, MARIO_PAL); }
 
     static Bitmap mushroom() { return PixelArt.render(MUSHROOM, MUSHROOM_PAL); }
+
+    static Bitmap leaf() { return PixelArt.render(LEAF, LEAF_PAL); }
 
     static Bitmap bomb() { return PixelArt.render(BOMB, BOMB_PAL); }
 

@@ -5,7 +5,8 @@ import java.util.regex.Pattern;
 
 /** 森林任务行：标题、CTA、奖励与执行分类。 */
 public final class ForestTask {
-    public enum Kind { BROWSE, CLAIM, DONE, SKIP }
+    /** DRAW：行上已经是「去抽奖」，点完直接进抽奖页，不再按浏览计时。 */
+    public enum Kind { BROWSE, CLAIM, DRAW, DONE, SKIP }
 
     public final String title;
     public final String cta;
@@ -37,7 +38,7 @@ public final class ForestTask {
     }
 
     public boolean actionable() {
-        return kind == Kind.BROWSE || kind == Kind.CLAIM;
+        return kind == Kind.BROWSE || kind == Kind.CLAIM || kind == Kind.DRAW;
     }
 
     /** 浏览时长：优先读取行内“浏览15s/30秒”，默认 15 秒。 */
