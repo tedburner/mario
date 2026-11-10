@@ -49,6 +49,19 @@ public class ActionGuardTest {
         assertTrue(ActionGuard.evaluate(ActionGuard.Surface.DIALOG, "立即抽奖").allowed);
         assertTrue(ActionGuard.evaluate(ActionGuard.Surface.DIALOG, "收下奖励").allowed);
         assertFalse(ActionGuard.evaluate(ActionGuard.Surface.DIALOG, "去购买").allowed);
+        // 真机 OCR 把相邻文案并进按钮行时必须拒绝，交由节点精确文本兜底（见 DialogDismissPolicy）。
+        assertFalse(ActionGuard.evaluate(ActionGuard.Surface.DIALOG, "10(0知道了8)8点").allowed);
+        assertFalse(ActionGuard.evaluate(ActionGuard.Surface.DIALOG, "10t0知道了8)8点").allowed);
+    }
+
+    @Test public void claimSurfaceOnlyAllowsClaimLabels() {
+        // 签到完成后起点把任务行按钮换成「领奖励」，只允许这类领取入口。
+        assertTrue(ActionGuard.evaluate(ActionGuard.Surface.CLAIM, "领奖励").allowed);
+        assertTrue(ActionGuard.evaluate(ActionGuard.Surface.CLAIM, "领取奖励").allowed);
+        assertFalse(ActionGuard.evaluate(ActionGuard.Surface.CLAIM, "去完成").allowed);
+        assertFalse(ActionGuard.evaluate(ActionGuard.Surface.CLAIM, "领积分").allowed);
+        assertFalse(ActionGuard.evaluate(ActionGuard.Surface.CLAIM, "去购买").allowed);
+        assertFalse(ActionGuard.evaluate(ActionGuard.Surface.CLAIM, "").allowed);
     }
 
     @Test public void navigationRejectsTradeAndAcceptsEntry() {

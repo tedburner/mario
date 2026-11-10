@@ -197,6 +197,23 @@ public class WelfareTaskLocatorTest {
         assertFalse(WelfareTaskLocator.claimedSignin(Arrays.asList(title,
                 new TextBlock("已领取", 947, 1718, 1057, 1756)), 1200));
     }
+    @Test public void signinClaimButtonOnlyAcceptsClaimLabels() {
+        // 真机 2026-11-10 14:01：签到完成后该行按钮为「领奖励」，必须再点一次才到账。
+        TextBlock title = new TextBlock("去携程签到领积分", 81, 1727, 465, 1773);
+        TextBlock claim = new TextBlock("领奖励", 947, 1763, 1057, 1801);
+        TextBlock coin = new TextBlock("+1点币(。", 81, 1800, 256, 1840);
+        assertSame(claim, WelfareTaskLocator.signinClaimButton(Arrays.asList(title, coin, claim), 1200));
+        // 已领取 / 去完成 都不是可领取态。
+        assertNull(WelfareTaskLocator.signinClaimButton(Arrays.asList(title,
+                new TextBlock("已领取", 947, 1763, 1057, 1801)), 1200));
+        assertNull(WelfareTaskLocator.signinClaimButton(Arrays.asList(title,
+                new TextBlock("去完成", 947, 1763, 1057, 1801)), 1200));
+        // 其他行的「领奖励」不套用签到行的几何兜底。
+        TextBlock incentive = new TextBlock("激励任务", 81, 1727, 260, 1773);
+        assertNull(WelfareTaskLocator.signinClaimButton(Arrays.asList(incentive, claim), 1200));
+        assertNull(WelfareTaskLocator.signinClaimButton(Collections.emptyList(), 1200));
+    }
+
     @Test public void describeListsRecognizedRowTitlesButtonsAndBottomZone() {
         String summary = WelfareTaskLocator.describe(Arrays.asList(
                 new TextBlock("激励任务", 50, 500, 180, 550),

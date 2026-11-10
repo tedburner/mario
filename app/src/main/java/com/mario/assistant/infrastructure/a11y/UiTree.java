@@ -87,6 +87,41 @@ public final class UiTree {
         return findClickableText(root, text);
     }
 
+    /**
+     * 按文案「包含」匹配可点击节点，并向上最多 6 层找可点祖先。
+     * 用于 OCR 把相邻文案并进按钮行（如「10(0知道了8)8点」）时——此时 OCR 坐标与文案都不可信，
+     * 但节点本身仍就是那个按钮。要求命中节点尺寸像按钮，避免误点到整块容器。
+     */
+    public AccessibilityNodeInfo findClickableContaining(String keyword) {
+        if (keyword == null || keyword.isEmpty()) return null;
+        return findClickableContaining(root, keyword, 0);
+    }
+
+    private AccessibilityNodeInfo findClickableContaining(AccessibilityNodeInfo node, String keyword, int depth) {
+        if (node == null || depth > 40) return null;
+        String text = node.getText() == null ? "" : node.getText().toString();
+        if (text.isEmpty() && node.getContentDescription() != null) {
+            text = node.getContentDescription().toString();
+        }
+        if (text.replace(" ", "").contains(keyword)) {
+            AccessibilityNodeInfo current = node;
+            for (int level = 0; current != null && level < 6; level++) {
+                if (current.isClickable() && current.isVisibleToUser()) {
+                    Rect r = new Rect();
+                    current.getBoundsInScreen(r);
+                    if (!r.isEmpty() && r.height() > 0 && r.height() <= height * 15 / 100) return current;
+                    break;
+                }
+                current = current.getParent();
+            }
+        }
+        for (int i = 0; i < node.getChildCount(); i++) {
+            AccessibilityNodeInfo found = findClickableContaining(node.getChild(i), keyword, depth + 1);
+            if (found != null) return found;
+        }
+        return null;
+    }
+
     private static AccessibilityNodeInfo findClickableText(AccessibilityNodeInfo node, String text) {
         if (node == null) return null;
         if (node.getText() != null && text.contentEquals(node.getText())) {

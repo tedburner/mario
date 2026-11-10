@@ -76,6 +76,22 @@ public final class WelfareTaskLocator {
         }
         return false;
     }
+    /**
+     * 携程行签到完成后的「领奖励」按钮。
+     *
+     * 真机（2026-11-10 14:01）：点完携程「立即签到」回到福利中心，该行按钮从「去完成」
+     * 变成「领奖励」，必须再点一次 +1 点币才真正到账；此前流程直接判定完成收尾。
+     * 仍然按「标题右侧、同一行带内的唯一短标签」定位，只接受领取类文案。
+     */
+    public static TextBlock signinClaimButton(List<TextBlock> boxes, int width) {
+        TextBlock title = soleCtripSigninTitle(boxes);
+        if (title == null) return null;
+        TextBlock button = soleSigninButton(boxes, title, width);
+        if (button == null || button.text == null) return null;
+        String text = button.text.replace(" ", "");
+        if (text.length() > 6 || !text.startsWith("领")) return null;
+        return button;
+    }
     /** 签到行的按钮：标题右侧、纵向同一条带内的唯一短标签（不接受含“携程”的文案）。 */
     private static TextBlock soleSigninButton(List<TextBlock> boxes, TextBlock title, int width) {
         if (title.left < 0 || title.right >= width || title.top >= title.bottom) return null;

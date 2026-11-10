@@ -5,3 +5,4 @@ app/build/
 *.jks
 .DS_Store
 .zcode/
+.workbuddy/

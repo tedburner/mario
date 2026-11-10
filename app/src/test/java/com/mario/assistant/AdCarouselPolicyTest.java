@@ -70,4 +70,25 @@ public class AdCarouselPolicyTest {
         assertSame(knowFull, AdCarouselPolicy.findDismissButton(Arrays.asList(
                 box("恭喜获得 200-30点订阅券"), knowFull)));
     }
+
+    @Test public void acceptsCenteredButtonRowMeasuredOnDevice() {
+        // 真机框：10(0知道了8)8点@418,1714-802,1767，屏幕 1200x2670，中心 610 正落在胶囊按钮上。
+        assertTrue(AdCarouselPolicy.isCenteredButtonRow(
+                new TextBlock("10(0知道了8)8点", 418, 1714, 802, 1767), 1200, 2670));
+    }
+
+    @Test public void rejectsRowsThatAreNotCenteredButtons() {
+        // 整行：宽度远超按钮带。
+        assertFalse(AdCarouselPolicy.isCenteredButtonRow(
+                new TextBlock("10点 知道了 888点", 0, 1714, 1200, 1767), 1200, 2670));
+        // 右侧任务行按钮：水平不居中。
+        assertFalse(AdCarouselPolicy.isCenteredButtonRow(
+                new TextBlock("去完成", 900, 1714, 1130, 1767), 1200, 2670));
+        // 高度像整段文字块，不是单行按钮。
+        assertFalse(AdCarouselPolicy.isCenteredButtonRow(
+                new TextBlock("10(0知道了8)8点", 418, 1500, 802, 2100), 1200, 2670));
+        assertFalse(AdCarouselPolicy.isCenteredButtonRow(null, 1200, 2670));
+        assertFalse(AdCarouselPolicy.isCenteredButtonRow(
+                new TextBlock("知道了", 418, 1714, 802, 1767), 0, 0));
+    }
 }

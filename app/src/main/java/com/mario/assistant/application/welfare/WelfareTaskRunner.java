@@ -13,8 +13,10 @@ import com.mario.assistant.domain.safety.ActionGuard;
 import com.mario.assistant.domain.welfare.AdCarouselPolicy;
 import com.mario.assistant.domain.welfare.AdFlow;
 import com.mario.assistant.domain.welfare.AdPromptMatcher;
+import com.mario.assistant.domain.welfare.DialogDismissPolicy;
 import com.mario.assistant.domain.welfare.ReadingNavigationPolicy;
 import com.mario.assistant.domain.welfare.SigninPolicy;
+import com.mario.assistant.domain.welfare.TaskEntryBudget;
 import com.mario.assistant.domain.welfare.VisualTargetGuard;
 import com.mario.assistant.domain.welfare.WelfareTaskLocator;
 import com.mario.assistant.infrastructure.a11y.Gestures;
@@ -28,6 +30,8 @@ public final class WelfareTaskRunner implements TaskRunner {
     private static final String TAG = "MarioAdDiag";
     private static final String QIDIAN = DeviceEnvironment.QIDIAN;
     private static final int STAGE_SIGNIN = 6;
+    /** 奖励弹窗唯一关闭按钮的节点原文；节点点击不依赖 OCR 坐标与合并后的文案。 */
+    private static final String DISMISS_LABEL = "知道了";
 
     private RunHost host;
     private RunToken token;
@@ -55,6 +59,10 @@ public final class WelfareTaskRunner implements TaskRunner {
     private long signinTapAt;
     private boolean signinClaimSeen;
     private int signinIdleFrames;
+    /** 携程签到行「领奖励」的点击次数与连续帧：签到完成后起点还要再点一次才真正到账。 */
+    private int signinClaimTaps;
+    private int signinClaimFrames;
+    private static final int MAX_SIGNIN_CLAIMS = 2;
     private String currentTaskTitle;
     private boolean currentSignin;
     private int returnedFrames;
@@ -67,11 +75,23 @@ public final class WelfareTaskRunner implements TaskRunner {
     private int adEntryRetries;
     private int readingPhase; // stage 5 内：0=找书架第一本书，1=书中阅读
     private long readingStartedAt;
+    /** 进入 stage 5（点击阅读入口）的时刻；阅读解锁的各阶段时限都以它为锚点。 */
+    private long readingEntryAt;
     private TextBlock priorBookTarget;
     private int bookScans;
     private int priorWidth, priorHeight;
     private long adTransitionDeadline;
     private long returnConfirmDeadline;
+    /** 同一条任务行在一次试运行内的进入预算，防止「行内状态未刷新」导致整轮反复。 */
+    private final TaskEntryBudget entryBudget = new TaskEntryBudget();
+    /** 本轮是广告任务行：只有它会向预算回报「是否真的走到了广告页」。 */
+    private boolean adRoundTracked;
+    /** 本轮是否确认进入了广告详情页（stage 2→3）；累计型任务靠它区分「有进展」和「空进」。 */
+    private boolean adRoundProgressed;
+    /** 起点停在阅读页/内页（没有标签栏）时按返回键的次数与连续帧计数。 */
+    private int tabBacks;
+    private int tabStuckFrames;
+    private static final int MAX_TAB_BACKS = 2;
 
     @Override public String id() { return "welfare"; }
 
@@ -114,6 +134,7 @@ public final class WelfareTaskRunner implements TaskRunner {
         if (stage == 2) {
             if (adFlow.observeDetail(pkg, now)) {
                 stage = 3;
+                adRoundProgressed = true;
                 log("已进入广告详情页，等待至少 15 秒。");
             } else if (QIDIAN.equals(pkg) && !host.ocr().busy()) {
                 // 疑似起点内落地页：用 OCR 确认广告底部操作区是否已消失。
@@ -223,12 +244,12 @@ public final class WelfareTaskRunner implements TaskRunner {
     /** OCR 结果的业务判定；固定在流程线程执行。 */
     private void handleOcrText(List<TextBlock> boxes, int imageWidth, int imageHeight, long capturedAt) {
         if (finished) return;
+        UiTree tree = host.trees().capture();
         if (stage == STAGE_SIGNIN) {
             // 签到页属于携程应用，必须在起点的包名过滤之前处理。
-            handleSigninOcr(boxes);
+            handleSigninOcr(boxes, tree, imageWidth, imageHeight);
             return;
         }
-        UiTree tree = host.trees().capture();
         String currentPkg = tree.root == null ? null : tree.packageName;
         boolean qidian = currentPkg != null
                 ? QIDIAN.equals(currentPkg)
@@ -246,7 +267,7 @@ public final class WelfareTaskRunner implements TaskRunner {
             break;
         }
         if (stage == 1) {
-            inspectAdPrompt(boxes, imageWidth, imageHeight, capturedAt);
+            inspectAdPrompt(tree, boxes, imageWidth, imageHeight, capturedAt);
             return;
         }
         if (stage == 2) {
@@ -263,16 +284,42 @@ public final class WelfareTaskRunner implements TaskRunner {
                 handleCarouselPrompt(imageWidth, imageHeight);
                 return;
             }
-            if (dismissKnownDialog(boxes)) return;
+            if (dismissKnownDialog(tree, boxes, imageWidth, imageHeight)) return;
             if (signinTask) {
-                // 签到任务：返回起点且连续两帧无奖励弹窗时视为完成；携程为最后一个任务，完成后收尾。
+                // 签到任务：签到页只负责点「立即签到」，真正的到账还要在福利中心点一次「领奖励」
+                // （真机 2026-11-10 14:01 回到福利中心时该行按钮正是「领奖励」+1点币，此前直接收尾）。
                 if (AdPromptMatcher.hasReward(boxes)) {
                     signinFrames = 0;
                     return;
                 }
+                if (currentSignin) {
+                    TextBlock claim = WelfareTaskLocator.signinClaimButton(boxes, imageWidth);
+                    if (claim == null) {
+                        signinClaimFrames = 0;
+                    } else if (++signinClaimFrames >= 2) {
+                        signinClaimFrames = 0;
+                        if (signinClaimTaps >= MAX_SIGNIN_CLAIMS) {
+                            stop("携程签到行的「领奖励」已点击 " + signinClaimTaps
+                                    + " 次仍未变成已领取，已停止；请手动确认。");
+                            return;
+                        }
+                        if (!allow(ActionGuard.Surface.CLAIM, claim.text)) {
+                            stop("签到奖励按钮「" + claim.text + "」被安全策略拒绝，已停止。");
+                            return;
+                        }
+                        signinClaimTaps++;
+                        tap(claim.left, claim.top, claim.right, claim.bottom,
+                                "已点击携程签到行的「领奖励」，等待奖励弹窗。", "领取签到奖励被中断。");
+                        return;
+                    } else {
+                        return; // 等下一帧确认按钮位置，避免误点
+                    }
+                }
                 if (++signinFrames >= 2) {
                     if (currentSignin) {
-                        finish("「去携程签到领积分」已完成，全部任务结束；请在福利中心核对各项奖励。");
+                        finish(signinClaimTaps > 0
+                                ? "「去携程签到领积分」奖励已领取，全部任务结束；请在福利中心核对。"
+                                : "「去携程签到领积分」已完成，但页面上没有出现「领奖励」，请在福利中心手动确认。");
                     } else {
                         nextTask("「" + currentTaskTitle + "」已返回起点；");
                     }
@@ -295,7 +342,7 @@ public final class WelfareTaskRunner implements TaskRunner {
             handleCarouselPrompt(imageWidth, imageHeight);
             return;
         }
-        if (dismissKnownDialog(boxes)) return;
+        if (dismissKnownDialog(tree, boxes, imageWidth, imageHeight)) return;
         WelfareTaskLocator.Row row = WelfareTaskLocator.find(boxes, imageWidth);
         if (row == null) {
             priorReadingTarget = null;
@@ -340,29 +387,52 @@ public final class WelfareTaskRunner implements TaskRunner {
             return;
         }
         priorReadingTarget = null;
+        if (entryBudget.stalled(row.title) >= TaskEntryBudget.MAX_STALLED_ENTRIES) {
+            // 进去了但连续两轮都没走到广告页：任务状态确实没推进，立刻停止而不是继续重试。
+            stop("「" + row.title + "」连续 " + entryBudget.stalled(row.title)
+                    + " 次进入后都没有走到广告页，任务状态未推进，已停止；请手动核对。");
+            return;
+        }
+        if (!entryBudget.tryEnter(row.title)) {
+            // 累计型任务每轮推进一档，只有打到硬上限才停；一次性任务则说明状态没有刷新。
+            stop("「" + row.title + "」已进入 " + entryBudget.entries(row.title)
+                    + " 次（上限 " + TaskEntryBudget.maxEntries(row.title)
+                    + " 次）仍未完成，已停止；请手动核对任务状态。");
+            return;
+        }
         if (!allow(ActionGuard.Surface.TASK_ROW, row.button.text)) {
             stop("任务行「" + row.title + "」被安全策略拒绝，已停止。");
             return;
         }
         if (row.signin) {
             // 签到类任务：点「去完成」后进入携程签到页，由 STAGE_SIGNIN 点「立即签到」再切回。
+            // 该行已是「领奖励」时是「签到过但没领」，复用同一路径等待奖励弹窗即可。
+            String buttonText = row.button.text == null ? "" : row.button.text.replace(" ", "");
+            boolean claimOnly = buttonText.startsWith("领");
             signinTask = true;
             signinFrames = 0;
             signinTapAt = 0;
             signinClaimSeen = false;
             signinIdleFrames = 0;
+            signinClaimTaps = 0;
+            signinClaimFrames = 0;
             currentTaskTitle = row.title;
             currentSignin = true;
+            adRoundTracked = false;
             stage = STAGE_SIGNIN;
-            deadline = host.now() + 45000;
+            // 签到要跨应用跳转（起点 → 携程 → 起点），45 秒会在回跳途中超时；放到 90 秒。
+            deadline = host.now() + 90000;
             tap(row.button.left, row.button.top, row.button.right, row.button.bottom,
-                    "已点击「" + row.title + "」，等待签到页面。", "签到入口点击被中断。");
+                    claimOnly ? "已点击携程签到行的「领奖励」，等待奖励弹窗。"
+                            : "已点击「" + row.title + "」，等待签到页面。",
+                    "签到入口点击被中断。");
             return;
         }
         signinTask = false;
         currentSignin = false;
         if (row.goRead) {
             currentTaskTitle = "限时广告加点";
+            adRoundTracked = false;
             if (unlockAttempts >= 2) {
                 finish("阅读解锁未生效（已尝试 " + unlockAttempts + " 次），请手动完成后重试。");
                 return;
@@ -372,7 +442,11 @@ public final class WelfareTaskRunner implements TaskRunner {
             readingPhase = 0;
             priorBookTarget = null;
             bookScans = 0;
-            unlockDeadline = host.now() + 200000;
+            readingEntryAt = host.now();
+            unlockDeadline = readingEntryAt + 200000;
+            // 阅读解锁要等页面 + 读满 2 分钟，会超过本轮 300 秒的看门狗；按阅读预算顺延，
+            // 否则会在读完前一刻被全局 deadline 掐断（真机实测差 1 秒）。
+            deadline = Math.max(deadline, unlockDeadline + 60000);
             tap(row.button.left, row.button.top, row.button.right, row.button.bottom,
                     "已点击「阅读1分钟」，将打开书架第一本书阅读 2 分钟。", "阅读入口点击被中断。");
             return;
@@ -380,18 +454,40 @@ public final class WelfareTaskRunner implements TaskRunner {
         stage = 1;
         adEntryAt = host.now();
         currentTaskTitle = row.title;
+        adRoundTracked = true;
+        adRoundProgressed = false;
         tap(row.button.left, row.button.top, row.button.right, row.button.bottom,
                 "已点击「" + row.title + "」任务入口，等待广告页面。", "任务入口点击被中断。");
     }
 
+    /**
+     * 把本轮结果回报给进入预算：走到广告页算「有进展」，没走到算「空进」。
+     *
+     * 累计型任务（激励任务里程碑）每轮都会让任务行保持「去完成」，因此不能只看进入次数；
+     * 只有连续空进才说明点击没生效、页面没打开这类真正的状态未推进。
+     */
+    private void recordRoundOutcome() {
+        if (!adRoundTracked) return;
+        if (adRoundProgressed) {
+            entryBudget.recordProgress(currentTaskTitle);
+        } else {
+            entryBudget.recordStalled(currentTaskTitle);
+        }
+        adRoundTracked = false;
+        adRoundProgressed = false;
+    }
+
     /** 单个任务流程结束：回到 stage 0 继续下一个任务；滚动预算与各阶段状态重置，截止时间顺延。 */
     private void nextTask(String reason) {
+        recordRoundOutcome();
         stage = 0;
         signinTask = false;
         signinFrames = 0;
         signinTapAt = 0;
         signinClaimSeen = false;
         signinIdleFrames = 0;
+        signinClaimTaps = 0;
+        signinClaimFrames = 0;
         returnedFrames = 0;
         adSheetFrames = 0;
         unlockAttempts = 0;
@@ -437,7 +533,29 @@ public final class WelfareTaskRunner implements TaskRunner {
         Log.i(TAG, "tabnav attempted=" + navigationAttempted + " marker=" + markerVisible
                 + " candidates=" + candidates + " tab=" + boxSummary(tab) + " prior=" + boxSummary(priorTabTarget)
                 + " stable=" + stableNow);
-        if (markerVisible || candidates != 1) { priorTabTarget = null; return; }
+        if (markerVisible || candidates != 1) {
+            priorTabTarget = null;
+            // candidates == 0 且没有任何我的页锚点：起点停在阅读页/内页，根本没有标签栏可点。
+            // 只按返回键（有次数上限）把它带回主页面，返回键无效时如实停止而不是干等到超时。
+            if (!markerVisible && candidates == 0) {
+                if (++tabStuckFrames < 2) return;
+                tabStuckFrames = 0;
+                if (tabBacks >= MAX_TAB_BACKS) {
+                    stop("未识别到起点标签栏，按返回键 " + MAX_TAB_BACKS + " 次仍无法回到主页面，已停止。");
+                    return;
+                }
+                tabBacks++;
+                if (host.env().back()) {
+                    log("起点当前不在主页面（无标签栏），已按返回键回到主页面。");
+                } else {
+                    stop("无法执行返回操作，请手动切回起点主页面。");
+                }
+            } else {
+                tabStuckFrames = 0;
+            }
+            return;
+        }
+        tabStuckFrames = 0;
         if (!ReadingNavigationPolicy.mayTapMyTab(1, true)) return;
         if (!stableNow || host.now() - capturedAt > 5000) {
             priorTabTarget = tab;
@@ -486,7 +604,8 @@ public final class WelfareTaskRunner implements TaskRunner {
     /** stage 5 phase 0：任务行可见=去阅读没生效；否则在书架页定位第一本书（双帧稳定后点击）。 */
     private void handleReadingUnlockOcr(List<TextBlock> boxes, int imageWidth, int imageHeight, long capturedAt) {
         long now = host.now();
-        long sinceEntry = now - (unlockDeadline - 150000);
+        // 以「点击阅读入口」为锚点计时；此前用 unlockDeadline-150000 反推，导致进入后前 55 秒空转。
+        long sinceEntry = readingEntryAt > 0 ? now - readingEntryAt : 0;
         if (readingPhase == 1) return;
         if (sinceEntry > 10000 && WelfareTaskLocator.find(boxes, imageWidth) != null) {
             stage = 0;
@@ -542,10 +661,10 @@ public final class WelfareTaskRunner implements TaskRunner {
     }
 
     /** 签到页：连续两帧确认「立即签到」再点；只认这一个文案，推广按钮一概不碰。 */
-    private void handleSigninOcr(List<TextBlock> boxes) {
+    private void handleSigninOcr(List<TextBlock> boxes, UiTree tree, int imageWidth, int imageHeight) {
         if (signinTapAt > 0) return;
         // 签到已完成后，起点把该行按钮换成“领奖励”，点击后直接弹“恭喜获得 +1点币 / 知道了”。
-        if (dismissKnownDialog(boxes)) { signinClaimSeen = true; signinIdleFrames = 0; return; }
+        if (dismissKnownDialog(tree, boxes, imageWidth, imageHeight)) { signinClaimSeen = true; signinIdleFrames = 0; return; }
         TextBlock button = SigninPolicy.findSigninButton(boxes);
         if (button != null) {
             if (++signinFrames < 2) return;
@@ -590,12 +709,13 @@ public final class WelfareTaskRunner implements TaskRunner {
         if (++adSheetFrames >= 2 && adFlow.confirmInAppDetail()) {
             adFlow.observeDetailInApp(host.now());
             stage = 3;
+            adRoundProgressed = true;
             log("已在起点内打开广告详情页，停留 15 秒后将自动返回。");
         }
     }
 
-    private void inspectAdPrompt(List<TextBlock> boxes, int imageWidth, int imageHeight, long capturedAt) {
-        if (dismissKnownDialog(boxes)) {
+    private void inspectAdPrompt(UiTree tree, List<TextBlock> boxes, int imageWidth, int imageHeight, long capturedAt) {
+        if (dismissKnownDialog(tree, boxes, imageWidth, imageHeight)) {
             // 福利中心奖励弹窗会吞掉任务入口点击；当前仍在福利中心，退回找任务阶段重新定位。
             navigationAttempted = true;
             stage = 0;
@@ -678,15 +798,79 @@ public final class WelfareTaskRunner implements TaskRunner {
         swipeLeft(imageWidth, imageHeight);
     }
 
-    /** 轮播完成后的奖励弹窗：唯一“知道了”按钮，连续两帧确认后点击关闭。 */
-    private boolean dismissKnownDialog(List<TextBlock> boxes) {
+    /**
+     * 轮播完成后的奖励弹窗：唯一“知道了”按钮，连续两帧确认后点击关闭。
+     *
+     * 三级取舍：无障碍节点精确文本 → OCR 文案过闸门 → 居中单行按钮带的几何兜底。
+     * 真机实测 OCR 会把同一行的「10点 / 知道了 / 888点」并成「10(0知道了8)8点」，
+     * 文案过不了白名单、起点的弹窗又不暴露可点节点（节点查不到），此前会每帧
+     * 「找到→拒绝→不点击」空转到 300 秒超时；三者都不成立时立刻停止，不再空转。
+     */
+    private boolean dismissKnownDialog(UiTree tree, List<TextBlock> boxes, int imageWidth, int imageHeight) {
         TextBlock target = AdCarouselPolicy.findDismissButton(boxes);
-        if (target == null) { dialogFrames = 0; return false; }
+        AccessibilityNodeInfo node = null;
+        if (target != null && tree != null) {
+            node = tree.findClickableText(DISMISS_LABEL);
+            if (node == null) node = tree.findClickableContaining(DISMISS_LABEL);
+        }
+        boolean ocrAllowed = target != null
+                && ActionGuard.evaluate(ActionGuard.Surface.DIALOG, target.text).allowed;
+        boolean centeredRow = AdCarouselPolicy.isCenteredButtonRow(target, imageWidth, imageHeight);
+        if (target != null) {
+            Rect nodeRect = new Rect();
+            if (node != null) node.getBoundsInScreen(nodeRect);
+            Log.i(TAG, "dialog ocr=" + boxSummary(target)
+                    + " node=" + (node == null ? "null" : nodeRect.left + "," + nodeRect.top
+                    + "-" + nodeRect.right + "," + nodeRect.bottom)
+                    + " allowed=" + ocrAllowed + " centered=" + centeredRow);
+        }
+        DialogDismissPolicy.Action action = DialogDismissPolicy.decide(
+                target != null, node != null, ocrAllowed, centeredRow);
+        if (action == DialogDismissPolicy.Action.IGNORE) { dialogFrames = 0; return false; }
         long now = host.now();
         if (dialogTapAt > 0 && now - dialogTapAt < 5000) return true; // 刚点过，等弹窗消失
         if (++dialogFrames < 2) return true;
         dialogFrames = 0;
-        if (!allow(ActionGuard.Surface.DIALOG, target.text)) return true;
+        if (action == DialogDismissPolicy.Action.STOP) {
+            // 找到弹窗但按钮无法确认：停止比继续空转更符合“不确定即停止”的边界。
+            stop("奖励弹窗按钮「" + target.text + "」无法确认，请手动关闭后重试。");
+            return true;
+        }
+        if (action == DialogDismissPolicy.Action.CLICK_NODE) {
+            if (!allow(ActionGuard.Surface.DIALOG, DISMISS_LABEL)) {
+                stop("奖励弹窗关闭按钮被安全策略拒绝，已停止。");
+                return true;
+            }
+            dialogTapAt = now;
+            Rect rect = new Rect();
+            node.getBoundsInScreen(rect);
+            if (node.performAction(AccessibilityNodeInfo.ACTION_CLICK)) {
+                log("已关闭奖励弹窗。");
+            } else if (!rect.isEmpty()) {
+                tap(rect.left, rect.top, rect.right, rect.bottom,
+                        "已关闭奖励弹窗。", "关闭奖励弹窗被中断。");
+            } else {
+                stop("无法关闭奖励弹窗，请手动关闭后重试。");
+            }
+            return true;
+        }
+        if (action == DialogDismissPolicy.Action.CLICK_CENTERED) {
+            // 文案被相邻内容粘住，但框落在居中单行按钮带内：按框中心点击。
+            if (!allow(ActionGuard.Surface.DIALOG, DISMISS_LABEL)) {
+                stop("奖励弹窗关闭按钮被安全策略拒绝，已停止。");
+                return true;
+            }
+            dialogTapAt = now;
+            int centerX = (target.left + target.right) / 2;
+            int centerY = (target.top + target.bottom) / 2;
+            tap(centerX, centerY, centerX, centerY,
+                    "已关闭奖励弹窗。", "关闭奖励弹窗被中断。");
+            return true;
+        }
+        if (!allow(ActionGuard.Surface.DIALOG, target.text)) {
+            stop("奖励弹窗关闭按钮「" + target.text + "」被安全策略拒绝，已停止。");
+            return true;
+        }
         dialogTapAt = now;
         tap(target.left, target.top, target.right, target.bottom,
                 "已关闭奖励弹窗。", "关闭奖励弹窗被中断。");

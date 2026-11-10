@@ -47,4 +47,20 @@ public final class AdCarouselPolicy {
         }
         return rewardDialog ? found : null;
     }
+
+    /**
+     * 关闭按钮被相邻文案「粘」住时的几何兜底：真机把「10点 / 知道了 / 888点」并成
+     * 「10(0知道了8)8点@418,1714-802,1767」，框中心正好落在居中的胶囊按钮上。
+     * 只认「水平居中 + 按钮宽度 + 单行行高」三件事同时成立，避免把整行或整块容器当成按钮。
+     */
+    public static boolean isCenteredButtonRow(TextBlock box, int imageWidth, int imageHeight) {
+        if (box == null || imageWidth <= 0 || imageHeight <= 0) return false;
+        int width = box.right - box.left;
+        int height = box.bottom - box.top;
+        if (width <= 0 || height <= 0) return false;
+        int centerX = (box.left + box.right) / 2;
+        return Math.abs(centerX - imageWidth / 2) <= imageWidth / 10
+                && width >= imageWidth / 5 && width <= imageWidth * 45 / 100
+                && height <= imageHeight * 6 / 100;
+    }
 }

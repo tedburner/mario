@@ -6,7 +6,7 @@ package com.mario.assistant.domain.safety;
  * 「找能量」页只允许「一键收」，「立即签到」只允许签到入口。
  */
 public final class ActionGuard {
-    public enum Surface { TASK_ROW, AD_PROMPT, SIGNIN, ENERGY_PAGE, DIALOG, NAVIGATION }
+    public enum Surface { TASK_ROW, AD_PROMPT, SIGNIN, CLAIM, ENERGY_PAGE, DIALOG, NAVIGATION }
 
     public static final class Decision {
         public final boolean allowed;
@@ -28,6 +28,8 @@ public final class ActionGuard {
     private static final String[] DIALOG_LABELS = {
             "知道了", "关闭", "点击退出关闭视频", "立即抽奖", "收下奖励"
     };
+    /** 签到完成后起点把任务行按钮换成「领奖励」：只认领取类文案，避免误点同位置的其他按钮。 */
+    private static final String[] CLAIM_LABELS = {"领奖励", "领取奖励"};
 
     private ActionGuard() { }
 
@@ -37,6 +39,12 @@ public final class ActionGuard {
         if (surface == Surface.SIGNIN) {
             return text.contains("立即签到") ? Decision.allow("签到入口")
                     : Decision.deny("签到页只允许「立即签到」");
+        }
+        if (surface == Surface.CLAIM) {
+            for (String allowed : CLAIM_LABELS) {
+                if (allowed.equals(text)) return Decision.allow("签到行领奖励");
+            }
+            return Decision.deny("领奖入口只允许「领奖励」");
         }
         if (surface == Surface.ENERGY_PAGE) {
             return text.contains("一键收") ? Decision.allow("一键收")
