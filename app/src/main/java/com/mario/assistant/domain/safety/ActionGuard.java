@@ -6,7 +6,7 @@ package com.mario.assistant.domain.safety;
  * 「找能量」页只允许「一键收」，「立即签到」只允许签到入口。
  */
 public final class ActionGuard {
-    public enum Surface { TASK_ROW, AD_PROMPT, SIGNIN, CLAIM, ENERGY_PAGE, DIALOG, NAVIGATION }
+    public enum Surface { TASK_ROW, AD_PROMPT, SIGNIN, CLAIM, ENERGY_PAGE, DIALOG, NAVIGATION, CHECKIN }
 
     public static final class Decision {
         public final boolean allowed;
@@ -30,6 +30,10 @@ public final class ActionGuard {
     };
     /** 签到完成后起点把任务行按钮换成「领奖励」：只认领取类文案，避免误点同位置的其他按钮。 */
     private static final String[] CLAIM_LABELS = {"领奖励", "领取奖励"};
+    /** 每日签到名单 APP 的入口/动作按钮：只认精确文案，同屏推广（签到领红包等）一律不点。 */
+    private static final String[] CHECKIN_LABELS = {"签到", "立即签到", "去签到", "签到福利"};
+    /** 日历型签到页（E充站）签到动作就是「今天」格，单独放行这一个文案。 */
+    private static final String[] CHECKIN_TODAY = {"今天"};
 
     private ActionGuard() { }
 
@@ -39,6 +43,15 @@ public final class ActionGuard {
         if (surface == Surface.SIGNIN) {
             return text.contains("立即签到") ? Decision.allow("签到入口")
                     : Decision.deny("签到页只允许「立即签到」");
+        }
+        if (surface == Surface.CHECKIN) {
+            for (String allowed : CHECKIN_LABELS) {
+                if (allowed.equals(text)) return Decision.allow("每日签到入口");
+            }
+            for (String allowed : CHECKIN_TODAY) {
+                if (allowed.equals(text)) return Decision.allow("日历签到今天格");
+            }
+            return Decision.deny("每日签到只允许已知签到文案");
         }
         if (surface == Surface.CLAIM) {
             for (String allowed : CLAIM_LABELS) {

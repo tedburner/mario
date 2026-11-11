@@ -106,6 +106,12 @@ public final class WelfareTaskRunner implements TaskRunner {
         this.token = token;
         this.gate = new ActionGate(host.log(), token);
         adFlow = new AdFlow();
+        // 串联运行时上一个任务可能把前台留在其他应用：不在起点就自行唤起
+        // （单独运行时主界面已启动起点，这里只是把已有任务栈唤到前台，不改页面）。
+        if (!QIDIAN.equals(host.env().foreground()) && !host.env().launch(QIDIAN, false)) {
+            finish("未找到起点读书，已跳过起点任务。");
+            return;
+        }
         host.env().resetForeground();
         deadline = host.now() + 300000;
         log("等待起点福利中心，将打开可执行的广告任务行。");

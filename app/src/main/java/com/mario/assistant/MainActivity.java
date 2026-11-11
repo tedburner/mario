@@ -69,23 +69,33 @@ public final class MainActivity extends Activity {
 
         root.addView(header());
 
-        TextView hint = MarioTheme.button(this, "出发前检查（防冻结）",
-                PixelArt.sprite(this, Sprites.exclaimBlock(), 18), MarioTheme.BRICK, 13, 42);
+        TextView hint = MarioTheme.button(this, "出发前检查",
+                PixelArt.sprite(this, Sprites.exclaimBlock(), 18), MarioTheme.BRICK, 13, 54);
         hint.setOnClickListener(v -> new AlertDialog.Builder(this)
                 .setTitle("出发前检查")
                 .setMessage(buildChecklist())
                 .setNeutralButton("其他权限", (d, w) -> startActivity(overlaySettingsIntent()))
                 .setPositiveButton("明白了", null)
                 .show());
-        root.addView(stacked(hint, 16, 6));
+        TextView automation = runButton("自动化", Sprites.mario(), MarioTheme.BRICK,
+                null, null, true, TaskService::armAutomation);
+        LinearLayout topRow = new LinearLayout(this);
+        topRow.addView(stretch(automation));
+        topRow.addView(gap(10));
+        topRow.addView(stretch(hint));
+        root.addView(stacked(topRow, 16, 10));
 
         root.addView(stacked(section("任务试运行"), 14, 6));
-        root.addView(stacked(runButton("起点任务", Sprites.coin(), MarioTheme.PIPE,
-                "未找到起点读书。", "com.qidian.QDReader", true, TaskService::inspectReading), 0, 10));
-        root.addView(stacked(runButton("森林任务", Sprites.mushroom(), MarioTheme.PIPE,
-                "未找到支付宝。", "com.eg.android.AlipayGphone", false, TaskService::arm), 0, 10));
-        root.addView(stacked(runButton("森林能量", Sprites.leaf(), MarioTheme.PIPE,
-                "未找到支付宝。", "com.eg.android.AlipayGphone", false, TaskService::armEnergy), 0, 10));
+        View checkinCell = gridRunButton("每日签到", Sprites.questionBlock(), MarioTheme.PIPE,
+                null, null, true, TaskService::armCheckin);
+        View readingCell = gridRunButton("起点任务", Sprites.coin(), MarioTheme.PIPE,
+                "未找到起点读书。", "com.qidian.QDReader", true, TaskService::inspectReading);
+        View forestCell = gridRunButton("森林任务", Sprites.mushroom(), MarioTheme.PIPE,
+                "未找到支付宝。", "com.eg.android.AlipayGphone", false, TaskService::arm);
+        View energyCell = gridRunButton("森林能量", Sprites.leaf(), MarioTheme.PIPE,
+                "未找到支付宝。", "com.eg.android.AlipayGphone", false, TaskService::armEnergy);
+        root.addView(gridRow(checkinCell, readingCell, forestCell));
+        root.addView(stacked(gridRow(energyCell), 10, 10));
         TextView stop = MarioTheme.button(this, "停止运行",
                 PixelArt.sprite(this, Sprites.bomb(), 24), MarioTheme.DANGER, 17, 54);
         stop.setOnClickListener(v -> {
@@ -216,16 +226,42 @@ public final class MainActivity extends Activity {
     private TextView runButton(String text, Bitmap icon, int[] colors, String missing,
                                String pkg, boolean overlayRequired, Consumer<TaskService> action) {
         TextView button = MarioTheme.button(this, text, PixelArt.sprite(this, icon, 24), colors, 17, 54);
+        bindRun(button, missing, pkg, overlayRequired, action);
+        return button;
+    }
+
+    /** 九宫格任务格：图标在上、文案在下，供一行三列的紧凑布局复用同一套启动逻辑。 */
+    private TextView gridRunButton(String text, Bitmap icon, int[] colors, String missing,
+                                   String pkg, boolean overlayRequired, Consumer<TaskService> action) {
+        TextView button = MarioTheme.gridButton(this, text, PixelArt.sprite(this, icon, 24), colors, 13, 84);
+        bindRun(button, missing, pkg, overlayRequired, action);
+        return button;
+    }
+
+    /** 一行三列的任务格：不足三个时用等宽空位补齐，保持列对齐。 */
+    private View gridRow(View... cells) {
+        LinearLayout row = new LinearLayout(this);
+        for (int i = 0; i < 3; i++) {
+            if (i > 0) row.addView(gap(8));
+            View cell = i < cells.length ? cells[i] : new View(this);
+            row.addView(stretch(cell));
+        }
+        return row;
+    }
+
+    private void bindRun(TextView button, String missing, String pkg,
+                         boolean overlayRequired, Consumer<TaskService> action) {
         button.setOnClickListener(v -> {
             TaskService service = TaskService.connected();
-            Intent launch = getPackageManager().getLaunchIntentForPackage(pkg);
-            if (service == null || launch == null) {
+            // pkg 为空表示多应用流程（自动化/每日签到）：目标应用由各运行器自行唤起。
+            Intent launch = pkg == null ? null : getPackageManager().getLaunchIntentForPackage(pkg);
+            if (service == null || (pkg != null && launch == null)) {
                 resultStatus.setText(service == null ? "请先开启无障碍服务。" : missing);
                 return;
             }
             Runnable start = () -> {
                 action.accept(service);
-                startActivity(launch);
+                if (launch != null) startActivity(launch);
                 prefs.edit().putInt("run_count", prefs.getInt("run_count", 0) + 1).apply();
                 refreshAll(true);
             };
@@ -234,7 +270,9 @@ public final class MainActivity extends Activity {
             if (overlayRequired && !Settings.canDrawOverlays(this)) {
                 new AlertDialog.Builder(this)
                         .setTitle("还差一项权限")
-                        .setMessage("跳转第三方广告后，系统会拦截后台启动起点。\n\n"
+                        .setMessage((pkg == null
+                                ? "流程需要在多个应用之间切换，系统会拦截后台启动其他应用。\n\n"
+                                : "跳转第三方广告后，系统会拦截后台启动起点。\n\n")
                                 + "请到 设置 → 应用管理 → Mario → 其他权限，\n"
                                 + "开启「后台弹出界面」和「显示悬浮窗」，再重新运行。")
                         .setPositiveButton("去授权", (d, w) -> {
@@ -250,7 +288,6 @@ public final class MainActivity extends Activity {
             }
             start.run();
         });
-        return button;
     }
 
     private View resultBox() {

@@ -2,6 +2,7 @@ package com.mario.assistant;
 
 import com.mario.assistant.application.RunCoordinator;
 import com.mario.assistant.application.RunHost;
+import com.mario.assistant.application.checkin.DailyCheckinRunner;
 import com.mario.assistant.application.forest.ForestEnergyRunner;
 import com.mario.assistant.application.forest.ForestTaskRunner;
 import com.mario.assistant.application.welfare.WelfareTaskRunner;
@@ -82,6 +83,21 @@ public final class TaskService extends AccessibilityService implements RunHost {
             coordinator.detach();
             coordinator.start(new WelfareTaskRunner());
         });
+    }
+    /** 每日签到：按名单逐个 APP 自动签到，单个失败跳过继续。 */
+    void armCheckin() {
+        if (scanHandler == null || coordinator == null) { save("识别线程未就绪，请稍后重试。"); return; }
+        scanHandler.post(() -> coordinator.start(new DailyCheckinRunner()));
+    }
+    /** 一键自动化：每日签到 → 起点任务 → 森林任务 → 森林能量，前一个收尾后自动接续。 */
+    void armAutomation() {
+        if (scanHandler == null || coordinator == null) { save("识别线程未就绪，请稍后重试。"); return; }
+        save("一键自动化：每日签到 → 起点任务 → 森林任务 → 森林能量。");
+        scanHandler.post(() -> coordinator.startChain(
+                new DailyCheckinRunner(),
+                new WelfareTaskRunner(),
+                new ForestTaskRunner(ForestTaskRunner.Mode.NORMAL),
+                new ForestEnergyRunner()));
     }
     void cancel() {
         if (scanHandler != null) scanHandler.post(() -> coordinator.stop("已停止。"));

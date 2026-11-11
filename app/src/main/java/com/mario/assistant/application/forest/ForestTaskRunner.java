@@ -111,6 +111,15 @@ public final class ForestTaskRunner implements TaskRunner {
             return;
         }
         deadline = now + 15 * 60 * 1000;
+        // 串联运行时前台可能还在起点：自行唤起支付宝，后续由恢复路径进森林奖励页。
+        if (!ALIPAY.equals(host.env().foreground())) {
+            if (!host.env().launch(ALIPAY, false)) {
+                stop("未找到支付宝，已跳过森林任务。");
+                return;
+            }
+            log("森林任务已启动：已唤起支付宝，将自动进入蚂蚁森林奖励页。");
+            return;
+        }
         log("森林任务已启动：请停留在蚂蚁森林-奖励页。");
     }
 

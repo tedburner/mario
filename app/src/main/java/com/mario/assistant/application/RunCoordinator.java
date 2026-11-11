@@ -1,6 +1,7 @@
 package com.mario.assistant.application;
 
 import android.util.Log;
+import java.util.ArrayDeque;
 import java.util.concurrent.atomic.AtomicInteger;
 
 /** 同一时刻只允许一个任务运行；切换时先失效旧代际，再停止旧任务并启动新任务。 */
@@ -8,6 +9,8 @@ public final class RunCoordinator {
     private final RunHost host;
     private final AtomicInteger generation = new AtomicInteger();
     private volatile TaskRunner active;
+    /** 一键自动化的待执行队列：当前任务自行收尾后按序接续；停止/异常/手动切换都会清空。 */
+    private final ArrayDeque<TaskRunner> pending = new ArrayDeque<>();
     private final Runnable loop = new Runnable() {
         @Override public void run() {
             TaskRunner runner = active;
@@ -34,7 +37,19 @@ public final class RunCoordinator {
     }
 
     public void start(TaskRunner runner) {
-        if (active != null) stop(null);
+        pending.clear();
+        activate(runner);
+    }
+
+    /** 一键自动化：首个任务收尾后按序接续后续任务，前台服务保持到链尾。 */
+    public void startChain(TaskRunner first, TaskRunner... rest) {
+        pending.clear();
+        for (TaskRunner runner : rest) pending.add(runner);
+        activate(first);
+    }
+
+    private void activate(TaskRunner runner) {
+        if (active != null) detach();
         host.startForeground();
         int next = generation.incrementAndGet();
         active = runner;
@@ -43,6 +58,7 @@ public final class RunCoordinator {
     }
 
     public void stop(String reason) {
+        pending.clear();
         detach();
         host.stopForeground();
         if (reason != null) host.log().save(reason);
@@ -66,5 +82,7 @@ public final class RunCoordinator {
         active = null;
         generation.incrementAndGet();
         host.handler().removeCallbacks(loop);
+        TaskRunner next = pending.poll();
+        if (next != null) activate(next);
     }
 }

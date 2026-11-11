@@ -126,4 +126,17 @@ final class MarioTheme {
         t.setBackground(blockButtonBg(c, colors));
         return t;
     }
+
+    /** 九宫格任务格：图标居中在上、文案在下，整体居中的像素方块；窄格也能放下四字任务名。 */
+    static TextView gridButton(Context c, String text, Drawable icon, int[] colors, float textSp, int heightDp) {
+        TextView t = label(c, text, textSp, 0xFFFFFFFF);
+        t.setGravity(Gravity.CENTER);
+        t.setIncludeFontPadding(false);
+        t.setCompoundDrawablesWithIntrinsicBounds(null, icon, null, null);
+        t.setCompoundDrawablePadding(dp(c, 6));
+        t.setPadding(dp(c, 4), dp(c, 12), dp(c, 4), dp(c, 12));
+        t.setHeight(dp(c, heightDp));
+        t.setBackground(blockButtonBg(c, colors));
+        return t;
+    }
 }

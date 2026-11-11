@@ -36,3 +36,63 @@
 ### [x] 5. 验证
 - 回链：[hld #1](hld.md#hld-1)、[hld #2](hld.md#hld-2)、[hld #5](hld.md#hld-5)
 - 构建 APK 并检查基本逻辑；在小米 15 实测权限、每个页面的识别、任务结果、异常退出及调度。若无法连接真机，明确列出未验证项目和需要用户提供的页面信息，不宣称四类任务可用。
+
+## 每日签到与一键自动化（2026-11-11）
+
+回链：[hld #6](hld.md#hld-6)、[hld #7](hld.md#hld-7)、[hld #8](hld.md#hld-8)
+
+### [x] 6. 签到模块
+- `domain/checkin/CheckinApp`：规格字段 name/packageName/homeEntry/popupFirst/tab/tabEntry/tapToday。
+- `domain/checkin/CheckinApps`：名单注册表，顺序 RQrun → E充站 → 比亚迪。
+- `domain/checkin/CheckinPolicy`：纯 JVM 匹配。入口/按钮全部精确文案 + 几何带 + 唯一候选：
+  首页入口全屏唯一；弹窗按钮限 15%~98% 高（下界贴近屏幕底部，真机 E充站「立即签到」底边在 97%），
+  按「立即签到 > 去签到 > 签到」优先级；底部标签限底边 12% 带；
+  标签页入口限顶栏 20% 带且右半屏，并容忍按钮图标被 OCR 成前缀（「6签到」→「签到」，仅去开头非汉字噪声，推广后缀不混入）；
+  日历型签到页（E充站）不找按钮，改点 20%~90% 高中唯一的「今天」格；歧义即返回 null。
+  完成标记按包含匹配（已签到/签到成功/明日再来/明天再来），另容忍「签到成功」中间单字形近误读（签到.功）。
+- 入口查找顺序：popupFirst 的 APP 先找弹窗按钮，再找 homeEntry（E充站右上角「签到」），
+  观察窗内都没有再走 tab → tabEntry；避免先点首页入口把弹窗关掉。
+- `application/checkin/DailyCheckinRunner`：tick 2s。单 APP 预算 60s（启动等待 20s、
+  闪屏结算 3.5s、弹窗观察窗 8s、标签结算 1.5s、点击结算 4s、动作按钮最多点 2 次）；
+  点过入口进入签到页后单独再给 45s（慢 webview）。非弹窗 APP（popupFirst=false）无首页入口时直接走底部标签，不等弹窗观察窗。
+  闸门校验匹配器认定的规范文案（标签/标签页入口），原始 OCR 文案仅用于诊断。
+  双帧稳定（VisualTargetGuard）+ 截图时效 5s 才点击；OCR/手势回调带应用身份守卫，
+  切换 APP 后旧回调不再作用。未安装/启动失败/超时/闸门拒绝都记录后跳过，收尾汇总
+  「完成 N，未确认 N，跳过 N」并逐项列原因。每次扫描向 logcat 输出全量 OCR 框供真机取证。
+- 安全：入口与动作按钮走 `ActionGuard.Surface.CHECKIN`（精确白名单），底部标签走 NAVIGATION；
+  允许/拒绝均写入运行日志。
+
+### [x] 7. 串联与入口
+- `RunCoordinator`：新增 pending 队列与 `startChain(first, rest...)`；`release` 在当前任务
+  自行收尾后取出下一个并 `activate`（重新计代际、重发 tick）；`stop`/`start` 清空队列，
+  `detach` 不清（供 inspectReading 先停旧任务再 start）。前台服务由各运行器收尾时停止，
+  链中下一个任务 activate 时重启，间隙仅在扫描线程同步代码内。
+- `TaskService.armCheckin` / `armAutomation`：后者串 DailyCheckinRunner → WelfareTaskRunner
+  → ForestTaskRunner(NORMAL) → ForestEnergyRunner。
+- `WelfareTaskRunner.onStart` / `ForestTaskRunner.onStart(NORMAL)`：前台不是目标应用时
+  `env.launch(pkg, false)` 自启动（单独运行时主界面已启动，等价于无害唤起）；启动失败
+  （未安装）如实收尾，串联时让下一个任务接续。
+- `MainActivity`：顶部「一键自动化」区新增「自动化」按钮；任务试运行区「每日签到」在
+  「起点任务」上方。`runButton` 支持 pkg=null 的多应用流程（不做单包预检、不代启动，
+  悬浮窗权限预检保留）。
+
+### [x] 8. 验证状态
+- 单测：CheckinPolicyTest（匹配/几何带/歧义/完成标记/图标前缀/「今天」格/注册表）、ActionGuardTest 新增 CHECKIN 场景；
+  全量 144 项通过，assembleDebug 通过（2026-11-11）。
+- 已真机验证（2026-11-11 小米 15 / Android 16 / HyperOS）：
+  1. 包名与安装状态：cn.runningquotient.rq、cn.charge（E充站）、com.byd.aeri.caranywhere 均在装；com.sgcc.evs.echarge 未安装；
+  2. RQrun：首页「签到福利」→ 签到页「签到成功」，签到完成；
+  3. 比亚迪：「我的」标签 → 右上角「签到」（OCR「6签到」）→「签到成功/积分+1」，签到完成；
+  4. E充站：冷启动先播开屏广告，之后首页右上角是唯一的「签到」入口（底部导航只有「充值中心/个人中心」，没有「我」标签）；
+     首次启动会弹签到弹窗，弹窗「立即签到」bounds 124,2442-1076,2592（1200x2670，底边 97%）；
+     点右上角「签到」进「每日签到赢好礼」页，页面没有签到按钮，点日历里的「今天」格即签到成功，
+     成功后出现「签到成功！本月累计签到 11 天」；当天再进首页时右上角变为「已签到」，运行器据此直接记「今日已签到」；
+  5. 真机修复：非弹窗 APP 标签导航不触发、入口图标前缀被闸门误拒、完成标记形近字（签到戌功）、
+     签到页慢 webview 超时、弹窗按钮贴底超出中部带、E充站无「我」标签。
+- 待真机取证（未验证不宣称可用）：
+  1. E充站签到弹窗「立即签到」的点击结果（首次弹窗出现时机不固定，当前已改为弹窗优先 + 右上角入口兜底，
+     两条路径都能到签到页/直接签到）；
+  2. 一键自动化全链路：签到 → 起点 → 森林任务冷启动恢复 → 森林能量衔接（用户自行点击验证）；
+  3. 首页广告弹窗遮挡标签等异常路径（当前超时跳过，不盲点）；
+  4. 已知限制：当日已签到后重跑，RQrun 隐藏「签到福利」→ 报未确认；E充站首页显示「已签到」→ 记「今日已签到」；
+     比亚迪会再次进入并点签到按钮（是否重复发分由 APP 决定）。

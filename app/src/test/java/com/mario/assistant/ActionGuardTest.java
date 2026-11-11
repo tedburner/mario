@@ -69,4 +69,21 @@ public class ActionGuardTest {
         assertTrue(ActionGuard.evaluate(ActionGuard.Surface.NAVIGATION, "福利中心").allowed);
         assertFalse(ActionGuard.evaluate(ActionGuard.Surface.NAVIGATION, "开通会员").allowed);
     }
+
+    @Test public void checkinOnlyAllowsKnownExactLabels() {
+        assertTrue(ActionGuard.evaluate(ActionGuard.Surface.CHECKIN, "签到").allowed);
+        assertTrue(ActionGuard.evaluate(ActionGuard.Surface.CHECKIN, "立即签到").allowed);
+        assertTrue(ActionGuard.evaluate(ActionGuard.Surface.CHECKIN, "去签到").allowed);
+        assertTrue(ActionGuard.evaluate(ActionGuard.Surface.CHECKIN, "签到福利").allowed);
+        assertTrue(ActionGuard.evaluate(ActionGuard.Surface.CHECKIN, "立即 签到").allowed);
+        // 日历型签到页（E充站）只放行「今天」格
+        assertTrue(ActionGuard.evaluate(ActionGuard.Surface.CHECKIN, "今天").allowed);
+        // 同屏推广与交易类文案一律拒绝
+        assertFalse(ActionGuard.evaluate(ActionGuard.Surface.CHECKIN, "签到领红包").allowed);
+        assertFalse(ActionGuard.evaluate(ActionGuard.Surface.CHECKIN, "签到充值").allowed);
+        assertFalse(ActionGuard.evaluate(ActionGuard.Surface.CHECKIN, "今天充值").allowed);
+        assertFalse(ActionGuard.evaluate(ActionGuard.Surface.CHECKIN, "明日再来").allowed);
+        assertFalse(ActionGuard.evaluate(ActionGuard.Surface.CHECKIN, "下载").allowed);
+        assertFalse(ActionGuard.evaluate(ActionGuard.Surface.CHECKIN, "").allowed);
+    }
 }
