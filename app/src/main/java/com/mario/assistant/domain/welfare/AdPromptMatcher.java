@@ -62,6 +62,7 @@ public final class AdPromptMatcher {
             if (box == null || box.text == null || box == disclosure) continue;
             if (!inActionBand(box, disclosure, width, height)) continue;
             if (isDeniedLabel(box.text.replace(" ", ""))) return null;
+            if (isDisclosureLike(box.text.replace(" ", ""))) continue;
             if (result != null) return null;
             result = box;
         }
@@ -77,6 +78,9 @@ public final class AdPromptMatcher {
             if (box == null || box.text == null || box == adMark) continue;
             if (!inActionBand(box, adMark, width, height)) continue;
             if (isDeniedLabel(box.text.replace(" ", ""))) return null;
+            // 披露行可能被 OCR 并入后续说明（真机：进入详倩页或第三方应用后,广告继续计时），
+            // 此时严格模板不成立、视频态兜底又会把它当成第二个候选，必须显式排除。
+            if (isDisclosureLike(box.text.replace(" ", ""))) continue;
             if (result != null) return null;
             result = box;
         }
@@ -87,6 +91,11 @@ public final class AdPromptMatcher {
         // 平台样板“进入详情页或第三方应用”共 11 字；实机 ML Kit 对第 4 字不稳定
         // （已观察 详惰/详倩/洋倩），仅放行该单字差异，其余字符必须逐一一致。
         return text.length() == 11 && text.startsWith("进入详") && text.endsWith("页或第三方应用");
+    }
+
+    /** 披露行被 OCR 并入说明文字时的识别（不要求严格 11 字，仅用于候选排除）。 */
+    private static boolean isDisclosureLike(String text) {
+        return text.startsWith("进入详") && text.contains("页或第三方应用");
     }
 
     /** 真机实测 (1200x2670)：按钮文字行距披露行约 77px、水平居中、行高约 58px。 */

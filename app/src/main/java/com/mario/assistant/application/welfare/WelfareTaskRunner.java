@@ -1,7 +1,6 @@
 package com.mario.assistant.application.welfare;
 
 import android.graphics.Rect;
-import android.util.Log;
 import android.view.accessibility.AccessibilityNodeInfo;
 import com.mario.assistant.application.ActionGate;
 import com.mario.assistant.application.RunHost;
@@ -22,6 +21,7 @@ import com.mario.assistant.domain.welfare.WelfareTaskLocator;
 import com.mario.assistant.infrastructure.a11y.Gestures;
 import com.mario.assistant.infrastructure.a11y.UiTree;
 import com.mario.assistant.infrastructure.system.DeviceEnvironment;
+import com.mario.assistant.infrastructure.ui.Diag;
 import java.util.List;
 import java.util.concurrent.atomic.AtomicBoolean;
 
@@ -82,6 +82,12 @@ public final class WelfareTaskRunner implements TaskRunner {
     private int priorWidth, priorHeight;
     private long adTransitionDeadline;
     private long returnConfirmDeadline;
+    /** stage 4：是否已确认起点回到前台；确认后不再走切回兜底。 */
+    private boolean returnConfirmed;
+    /** stage 4 切回兜底进度：0 未兜底，1 已按 Home，2 已重新打开起点。 */
+    private int returnFallbackStep;
+    /** 已确认回到起点后，前台再次被其他应用抢走的连续帧数。 */
+    private int returnLostFrames;
     /** 同一条任务行在一次试运行内的进入预算，防止「行内状态未刷新」导致整轮反复。 */
     private final TaskEntryBudget entryBudget = new TaskEntryBudget();
     /** 本轮是广告任务行：只有它会向预算回报「是否真的走到了广告页」。 */
@@ -92,6 +98,8 @@ public final class WelfareTaskRunner implements TaskRunner {
     private int tabBacks;
     private int tabStuckFrames;
     private static final int MAX_TAB_BACKS = 2;
+    /** 上一次 tick 的 elapsedRealtime；用于记录进程被冻结造成的扫描空窗。 */
+    private long lastTickAt;
 
     @Override public String id() { return "welfare"; }
 
@@ -136,57 +144,116 @@ public final class WelfareTaskRunner implements TaskRunner {
             root = tree.root;
             pkg = tree.packageName;
         }
-        Log.i(TAG, "scan stage=" + stage + " busy=" + host.ocr().busy() + " pkg=" + pkg);
+        if (lastTickAt > 0 && now - lastTickAt > 15000) {
+            // 真机被 MIUI 冻结时扫描循环会整段停摆；恢复后首帧留下空窗，便于回看卡顿位置。
+            Diag.i(TAG, "tick gap=" + (now - lastTickAt) + "ms stage=" + stage
+                    + " pkg=" + pkg + " fg=" + host.env().foreground());
+        }
+        lastTickAt = now;
+        Diag.i(TAG, "scan stage=" + stage + " busy=" + host.ocr().busy() + " pkg=" + pkg);
         if (stage == 2) {
             if (adFlow.observeDetail(pkg, now)) {
                 stage = 3;
                 adRoundProgressed = true;
                 log("已进入广告详情页，等待至少 15 秒。");
+            } else if (adFlow.isBlockedLanding(pkg)) {
+                stop("广告跳转到应用商店/安装页（" + pkg + "），已停止自动操作，请手动返回起点。");
+            } else if (adFlow.isTransient(pkg)) {
+                // 系统浮层/桌面的瞬时前台：继续等待真正的落地应用。
             } else if (QIDIAN.equals(pkg) && !host.ocr().busy()) {
                 // 疑似起点内落地页：用 OCR 确认广告底部操作区是否已消失。
                 inspectScreen();
             } else if (!pkg.isEmpty()) {
-                stop("广告进入未适配的应用，已停止自动操作。");
+                stop("广告进入未适配的应用（" + pkg + "），已停止自动操作。");
             } else if (now >= adTransitionDeadline) {
                 stop("广告点击后未确认详情页打开（前台记录："
                         + (host.env().foreground().isEmpty() ? "无，若持续如此请关闭再开启无障碍服务" : host.env().foreground())
                         + "），已超时停止。");
             }
         } else if (stage == 3) {
-            if (!pkg.isEmpty() && !adFlow.isDestination(pkg)) {
-                stop("已离开广告详情页，已停止自动返回。");
+            if (QIDIAN.equals(pkg)) {
+                // 广告自己退回起点：不再按键/重开，直接进入返回后的奖励确认。
+                beginReturnConfirmation(now, 0);
+                log("广告已自行返回起点，等待奖励确认。");
+            } else if (adFlow.isBlockedLanding(pkg)) {
+                stop("广告跳转到应用商店/安装页（" + pkg + "），已停止自动操作，请手动返回起点。");
+            } else if (adFlow.isTransient(pkg)) {
+                // 桌面/系统浮层帧：忽视，等真正的前台应用。
+            } else if (adFlow.observeChainHop(pkg)) {
+                log("广告链继续跳转到 " + pkg + "（链路：" + adFlow.chainDescription()
+                        + "），15 秒计时不重置。");
+            } else if (!adFlow.isDestination(pkg)) {
+                stop("广告跳转到未识别的应用（" + foregroundName() + "），已停止自动操作。");
             } else if (adFlow.shouldReturn(pkg, now)) {
                 if (adFlow.isInApp()) {
                     if (host.env().back()) {
                         adFlow.returnRequested();
-                        stage = 4;
-                        adTransitionDeadline = now + 30000;
-                        returnConfirmDeadline = 0;
+                        beginReturnConfirmation(now, 0);
                         log("已在起点内停留 15 秒，已按返回键退出详情页，等待奖励提示。");
                     } else {
                         stop("无法执行返回操作，请手动返回。");
                     }
                 } else if (host.env().reopen(QIDIAN)) {
                     adFlow.returnRequested();
-                    stage = 4;
-                    adTransitionDeadline = now + 30000;
-                    returnConfirmDeadline = now + 5000;
-                    log("已请求切回起点，等待前台窗口切换。");
+                    beginReturnConfirmation(now, 5000);
+                    log("已在广告链停留 15 秒（" + adFlow.chainDescription()
+                            + "），已请求切回起点，等待前台窗口切换。");
                 } else {
                     stop("无法返回起点，请手动切回。");
                 }
             }
         } else if (stage == 4) {
             boolean backInReading = QIDIAN.equals(host.env().foreground()) || QIDIAN.equals(pkg);
-            if (returnConfirmDeadline > 0 && !backInReading && now >= returnConfirmDeadline) {
-                stop(host.env().canDrawOverlays()
-                        ? "系统拦截了后台启动起点，请检查 MIUI「后台弹出界面」权限后重试。"
-                        : "系统拦截了后台启动起点：请授予「后台弹出界面」和「显示悬浮窗」后重试。");
-            } else if (now >= adTransitionDeadline) {
-                stop("未能确认返回后的奖励，请手动检查。");
-            } else if (!host.ocr().busy() && (root != null || QIDIAN.equals(host.env().foreground()))) {
-                // 返回起点后的奖励/轮播提示只能靠 OCR 判定，必须在此持续触发识别。
-                inspectScreen();
+            if (backInReading) {
+                returnConfirmed = true;
+                returnConfirmDeadline = 0;
+                returnFallbackStep = 0;
+                returnLostFrames = 0;
+            }
+            if (!returnConfirmed) {
+                long now2 = host.now();
+                if (returnFallbackStep == 0 && returnConfirmDeadline > 0 && now2 >= returnConfirmDeadline) {
+                    returnFallbackStep = 1;
+                    if (host.env().home()) {
+                        log("切回起点未生效（前台：" + foregroundName() + "），已按 Home 回到桌面，准备重新打开起点。");
+                    } else {
+                        stop("无法切回起点，请手动切换后重试。");
+                        return;
+                    }
+                }
+                if (returnFallbackStep == 1 && now2 >= returnConfirmDeadline + 2000) {
+                    returnFallbackStep = 2;
+                    if (!host.env().reopen(QIDIAN)) {
+                        stop("无法重新打开起点，请手动切换后重试。");
+                        return;
+                    }
+                    log("已从桌面重新打开起点。");
+                }
+                if (returnFallbackStep == 2 && now2 >= returnConfirmDeadline + 7000) {
+                    stop("切回起点失败（前台：" + foregroundName()
+                            + "），请检查 MIUI「后台弹出界面」与「显示悬浮窗」权限后重试。");
+                    return;
+                }
+                if (now2 >= adTransitionDeadline) {
+                    stop("未能确认返回后的奖励，请手动检查。");
+                    return;
+                }
+                if (!host.ocr().busy() && (root != null || QIDIAN.equals(host.env().foreground()))) {
+                    // 返回起点后的奖励/轮播提示只能靠 OCR 判定，必须在此持续触发识别。
+                    inspectScreen();
+                }
+            } else {
+                if (!backInReading && ++returnLostFrames >= 2) {
+                    // 已确认回到起点后又被第三方应用抢走：如实说明是前台变化，不再误报 MIUI 权限。
+                    stop("已离开起点（前台：" + foregroundName() + "），已停止自动操作。");
+                    return;
+                }
+                if (backInReading) returnLostFrames = 0;
+                if (now >= adTransitionDeadline) {
+                    stop("未能确认返回后的奖励，请手动检查。");
+                } else if (!host.ocr().busy() && (root != null || QIDIAN.equals(host.env().foreground()))) {
+                    inspectScreen();
+                }
             }
         } else if (stage == 5) {
             // 阅读解锁两阶段：找到书架第一本书 → 书中阅读 1 分钟 → 返回并重走导航
@@ -264,12 +331,12 @@ public final class WelfareTaskRunner implements TaskRunner {
         if (!AdCarouselPolicy.isContinuePrompt(boxes)) carouselFrames = 0;
         for (TextBlock box : boxes) {
             if (box == null || box.text == null || !box.text.contains("恭喜")) continue;
-            Log.i(TAG, "ocr congrats: " + allText(boxes));
+            Diag.i(TAG, "ocr congrats: " + allText(boxes));
             break;
         }
         for (TextBlock box : boxes) {
             if (box == null || box.text == null || !box.text.contains("知道")) continue;
-            Log.i(TAG, "ocr know: " + allText(boxes));
+            Diag.i(TAG, "ocr know: " + allText(boxes));
             break;
         }
         if (stage == 1) {
@@ -285,7 +352,7 @@ public final class WelfareTaskRunner implements TaskRunner {
             return;
         }
         if (stage == 4) {
-            Log.i(TAG, "stage4 boxes=" + allText(boxes));
+            Diag.i(TAG, "stage4 boxes=" + allText(boxes));
             if (!signinTask && AdCarouselPolicy.isContinuePrompt(boxes)) {
                 handleCarouselPrompt(imageWidth, imageHeight);
                 return;
@@ -352,7 +419,7 @@ public final class WelfareTaskRunner implements TaskRunner {
         WelfareTaskLocator.Row row = WelfareTaskLocator.find(boxes, imageWidth);
         if (row == null) {
             priorReadingTarget = null;
-            Log.i(TAG, WelfareTaskLocator.describe(boxes, imageHeight));
+            Diag.i(TAG, WelfareTaskLocator.describe(boxes, imageHeight));
             logSigninGeometry(boxes);
             if (WelfareTaskLocator.claimedSignin(boxes, imageWidth)) {
                 // 携程行已是“已领取”，其余任务行也不可点：本轮任务全部完成，不必再滑动到超时。
@@ -514,6 +581,9 @@ public final class WelfareTaskRunner implements TaskRunner {
         adEntryAt = 0;
         adEntryRetries = 0;
         returnConfirmDeadline = 0;
+        returnConfirmed = false;
+        returnFallbackStep = 0;
+        returnLostFrames = 0;
         if (adFlow != null) adFlow.reset();
         deadline = host.now() + 300000;
         log(reason + "继续查找下一个任务。");
@@ -536,7 +606,7 @@ public final class WelfareTaskRunner implements TaskRunner {
             tab = box;
         }
         boolean stableNow = tab != null && VisualTargetGuard.stable(priorTabTarget, tab, width, height);
-        Log.i(TAG, "tabnav attempted=" + navigationAttempted + " marker=" + markerVisible
+        Diag.i(TAG, "tabnav attempted=" + navigationAttempted + " marker=" + markerVisible
                 + " candidates=" + candidates + " tab=" + boxSummary(tab) + " prior=" + boxSummary(priorTabTarget)
                 + " stable=" + stableNow);
         if (markerVisible || candidates != 1) {
@@ -595,14 +665,14 @@ public final class WelfareTaskRunner implements TaskRunner {
     private Gestures.Callback swipeCallback(String tag, String success) {
         return new Gestures.Callback() {
             @Override public void onCompleted() {
-                Log.i(TAG, tag + " completed");
+                Diag.i(TAG, tag + " completed");
                 if (token.isCurrent() && !finished) log(success);
             }
             @Override public void onCancelled() {
-                Log.i(TAG, tag + " cancelled");
+                Diag.i(TAG, tag + " cancelled");
             }
             @Override public void onRejected() {
-                Log.i(TAG, tag + " rejected");
+                Diag.i(TAG, tag + " rejected");
             }
         };
     }
@@ -629,7 +699,7 @@ public final class WelfareTaskRunner implements TaskRunner {
             if (content.length() > 0) content.append(' ');
             content.append(box.text).append('@').append(box.top).append('-').append(box.bottom);
         }
-        Log.i(TAG, "bookshelf book=" + (book == null ? "null" : boxSummary(book))
+        Diag.i(TAG, "bookshelf book=" + (book == null ? "null" : boxSummary(book))
                 + " content=[" + content + "]");
         if (book == null) {
             priorBookTarget = null;
@@ -690,16 +760,29 @@ public final class WelfareTaskRunner implements TaskRunner {
         }
     }
 
+    /** 已发起切回起点：stage 4 从这里开始确认前台，并给后台启动被拦截留出兜底时间。 */
+    private void beginReturnConfirmation(long now, long confirmDelayMs) {
+        stage = 4;
+        returnConfirmed = false;
+        returnFallbackStep = 0;
+        returnLostFrames = 0;
+        adTransitionDeadline = now + 30000;
+        returnConfirmDeadline = confirmDelayMs > 0 ? now + confirmDelayMs : 0;
+    }
+
+    private String foregroundName() {
+        String fg = host.env().foreground();
+        return fg == null || fg.isEmpty() ? "未知" : fg;
+    }
+
     /** 签到点击完成后切回起点，由 stage 4 的签到分支核对奖励并收尾。 */
     private void returnAfterSignin(long now) {
         if (!host.env().reopen(QIDIAN)) {
             stop("无法返回起点，请手动返回。");
             return;
         }
-        stage = 4;
         signinFrames = 0;
-        adTransitionDeadline = now + 30000;
-        returnConfirmDeadline = now + 5000;
+        beginReturnConfirmation(now, 5000);
         log("携程签到已点击，正在切回起点核对任务状态。");
     }
 
@@ -738,14 +821,14 @@ public final class WelfareTaskRunner implements TaskRunner {
         int width = imageWidth, height = imageHeight;
         TextBlock anchor = AdPromptMatcher.findStabilityAnchor(boxes, width, height);
         TextBlock target = AdPromptMatcher.findDetails(boxes, width, height);
-        Log.i(TAG, "target=" + (target != null) + " anchor=" + (anchor != null)
+        Diag.i(TAG, "target=" + (target != null) + " anchor=" + (anchor != null)
                 + " boxes=" + boxes.size() + " age=" + (host.now() - capturedAt)
                 + " prior=" + (priorAdTarget != null)
                 + " stable=" + VisualTargetGuard.stableDetails(priorAdTarget, target, priorAdAnchor, anchor, width, height));
         if (target == null || anchor == null) {
             priorAdTarget = null;
             priorAdAnchor = null;
-            Log.i(TAG, AdPromptMatcher.describe(boxes, width, height));
+            Diag.i(TAG, AdPromptMatcher.describe(boxes, width, height));
             if (WelfareTaskLocator.find(boxes, width) != null
                     && host.now() - adEntryAt > 12000) {
                 // 入口点击未生效（弹窗吞点击/按钮无响应）：回到找任务阶段重新定位，最多重试 2 次。
@@ -761,7 +844,7 @@ public final class WelfareTaskRunner implements TaskRunner {
         if (priorWidth != width || priorHeight != height
                 || !VisualTargetGuard.stableDetails(priorAdTarget, target, priorAdAnchor, anchor, width, height)
                 || host.now() - capturedAt > 5000) {
-            Log.i(TAG, "stable-wait prior=" + boxSummary(priorAdTarget) + " target=" + boxSummary(target)
+            Diag.i(TAG, "stable-wait prior=" + boxSummary(priorAdTarget) + " target=" + boxSummary(target)
                     + " anchor=" + boxSummary(anchor));
             priorAdTarget = target;
             priorAdAnchor = anchor;
@@ -774,7 +857,7 @@ public final class WelfareTaskRunner implements TaskRunner {
             return;
         }
         adFlow.detailsRequested();
-        Log.i(TAG, "dispatch details");
+        Diag.i(TAG, "dispatch details");
         stage = 2;
         adSheetFrames = 0;
         adTransitionDeadline = host.now() + 30000;
@@ -825,7 +908,7 @@ public final class WelfareTaskRunner implements TaskRunner {
         if (target != null) {
             Rect nodeRect = new Rect();
             if (node != null) node.getBoundsInScreen(nodeRect);
-            Log.i(TAG, "dialog ocr=" + boxSummary(target)
+            Diag.i(TAG, "dialog ocr=" + boxSummary(target)
                     + " node=" + (node == null ? "null" : nodeRect.left + "," + nodeRect.top
                     + "-" + nodeRect.right + "," + nodeRect.bottom)
                     + " allowed=" + ocrAllowed + " centered=" + centeredRow);
@@ -908,22 +991,22 @@ public final class WelfareTaskRunner implements TaskRunner {
         // dispatchGesture 在后台线程调用（曾在主线程卡死且回调不返回）；回调经流程线程回流。
         host.handler().postDelayed(() -> {
             if (token.isCurrent() && !finished && !gestureDone.get())
-                Log.i(TAG, "gesture callback pending "
+                Diag.i(TAG, "gesture callback pending "
                         + (host.now() - dispatchedAt) + "ms; flow continues");
         }, 3000);
         host.gestures().tap(new Bounds(left, top, right, bottom), 80, new Gestures.Callback() {
             @Override public void onCompleted() {
-                Log.i(TAG, "gesture completed");
+                Diag.i(TAG, "gesture completed");
                 gestureDone.set(true);
                 if (token.isCurrent() && !finished) log(success);
             }
             @Override public void onCancelled() {
-                Log.i(TAG, "gesture cancelled");
+                Diag.i(TAG, "gesture cancelled");
                 gestureDone.set(true);
                 if (token.isCurrent() && !finished) stop(failure);
             }
             @Override public void onRejected() {
-                Log.i(TAG, "gesture rejected");
+                Diag.i(TAG, "gesture rejected");
                 if (token.isCurrent() && !finished) stop(failure);
             }
         });
@@ -968,6 +1051,10 @@ public final class WelfareTaskRunner implements TaskRunner {
         if (finished) return;
         finished = true;
         if (adFlow != null) adFlow.cancel();
+        Diag.i(TAG, "finish stage=" + stage + " task=" + currentTaskTitle
+                + " entries=" + entryBudget.entries(currentTaskTitle)
+                + " stalled=" + entryBudget.stalled(currentTaskTitle)
+                + " fg=" + foregroundName() + " result=" + result);
         log(result);
         host.stopForeground();
     }
@@ -998,7 +1085,7 @@ public final class WelfareTaskRunner implements TaskRunner {
             sb.append(' ').append(box.text).append('@').append(box.left).append(',').append(box.top)
                     .append('-').append(box.right).append(',').append(box.bottom);
         }
-        Log.i(TAG, sb.toString());
+        Diag.i(TAG, sb.toString());
     }
 
     private static boolean hasOcrText(List<TextBlock> boxes, String expected) {

@@ -1,10 +1,11 @@
 package com.mario.assistant.infrastructure.system;
 
+import com.mario.assistant.infrastructure.ui.Diag;
+
 import android.accessibilityservice.AccessibilityService;
 import android.content.Intent;
 import android.content.pm.PackageManager;
 import android.util.DisplayMetrics;
-import android.util.Log;
 import android.view.accessibility.AccessibilityEvent;
 
 /** 设备环境：前台包名、已安装应用、启动应用、屏幕尺寸、系统返回/主页。 */
@@ -26,11 +27,11 @@ public final class DeviceEnvironment {
         String next = pkg.toString();
         if (isSystemOverlay(next)) {
             // 通知栏/音量面板等系统浮层不是广告落地页，不能覆盖真正的应用前台记录。
-            Log.i("MarioAdDiag", "overlay=" + next + " cls=" + event.getClassName());
+            Diag.i("MarioAdDiag", "overlay=" + next + " cls=" + event.getClassName());
             return;
         }
         if (!next.equals(foregroundPkg)) {
-            Log.i("MarioAdDiag", "foreground=" + next + " cls=" + event.getClassName());
+            Diag.i("MarioAdDiag", "foreground=" + next + " cls=" + event.getClassName());
         }
         foregroundPkg = next;
     }

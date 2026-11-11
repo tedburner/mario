@@ -1,7 +1,6 @@
 package com.mario.assistant.application.checkin;
 
 import android.os.Build;
-import android.util.Log;
 import com.mario.assistant.application.ActionGate;
 import com.mario.assistant.application.RunHost;
 import com.mario.assistant.application.RunToken;
@@ -14,6 +13,7 @@ import com.mario.assistant.domain.model.TextBlock;
 import com.mario.assistant.domain.safety.ActionGuard;
 import com.mario.assistant.domain.welfare.VisualTargetGuard;
 import com.mario.assistant.infrastructure.a11y.Gestures;
+import com.mario.assistant.infrastructure.ui.Diag;
 import java.util.ArrayList;
 import java.util.List;
 
@@ -169,7 +169,7 @@ public final class DailyCheckinRunner implements TaskRunner {
         }, errorCode -> {
             if (!token.isCurrent() || finished || captured != app) return;
             // 截图偶发失败不立即停：下一帧重试，持续失败由单 APP 超时兜底。
-            Log.i(TAG, "checkin screenshot error " + errorCode);
+            Diag.i(TAG, "checkin screenshot error " + errorCode);
         });
     }
 
@@ -179,7 +179,7 @@ public final class DailyCheckinRunner implements TaskRunner {
         if (!app.packageName.equals(pkg) && !app.packageName.equals(host.env().foreground())) {
             return; // 系统弹窗等抢走前台：等它回来，超时兜底
         }
-        Log.i(TAG, "checkin app=" + app.name + " phase=" + phase + " step=" + entryStep
+        Diag.i(TAG, "checkin app=" + app.name + " phase=" + phase + " step=" + entryStep
                 + " ocr=" + CheckinPolicy.describe(boxes));
         if (CheckinPolicy.isDone(boxes)) {
             doneCount++;
@@ -344,6 +344,9 @@ public final class DailyCheckinRunner implements TaskRunner {
     private void finish(String result) {
         if (finished) return;
         finished = true;
+        Diag.i(TAG, "finish done=" + doneCount + " unsure=" + unsureCount
+                + " skipped=" + skippedCount + " index=" + index + "/" + apps.size()
+                + " result=" + result);
         log(result);
         host.stopForeground();
     }

@@ -51,7 +51,7 @@ public class AdCarouselPolicyTest {
         TextBlock know = box("知道了");
         assertSame(know, AdCarouselPolicy.findDismissButton(Arrays.asList(
                 box("恭喜获得"), box("10点章节卡（1天）"), know)));
-        // OCR 带标点/误识时按“知道”包含匹配。
+        // OCR 带标点时仍按完整“知道了”包含匹配。
         TextBlock knowPunct = box("知道了。");
         assertSame(knowPunct, AdCarouselPolicy.findDismissButton(Arrays.asList(
                 box("恭喜获得"), knowPunct)));
@@ -60,6 +60,14 @@ public class AdCarouselPolicyTest {
         assertNull(AdCarouselPolicy.findDismissButton(Arrays.asList(box("10点章节卡"))));
         assertNull(AdCarouselPolicy.findDismissButton(Arrays.asList(
                 box("恭喜获得"), box("知道了"), box("知道了。"))));
+    }
+
+    @Test public void ignoresAdCreativeThatOnlyContainsZhiDaoWithoutLe() {
+        // 真机（2026-11-11 美团素材）：“别人都不知道的美团”+“点击后,看15秒可获得奖励”
+        // 同时满足旧的“知道 + 获得”条件，被误当成奖励弹窗按钮，stage 1 直接停止。
+        assertNull(AdCarouselPolicy.findDismissButton(Arrays.asList(
+                box("点击后,看15秒可获得奖励"), box("别人都不知道的美团"),
+                box("立即领取"), box("广告"))));
     }
     @Test public void toleratesCongratsMisreadOnCouponDialog() {
         // 真机 ML Kit 把“恭喜获得200-30点订阅券”读成“恭套获得200-30点订阅券”。

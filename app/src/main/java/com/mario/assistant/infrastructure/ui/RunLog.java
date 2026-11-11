@@ -1,7 +1,6 @@
 package com.mario.assistant.infrastructure.ui;
 
 import android.content.Context;
-import android.util.Log;
 import java.util.function.BooleanSupplier;
 
 /** 运行结果：logcat + 主界面持久化 + 前台通知实时刷新。 */
@@ -14,10 +13,11 @@ public final class RunLog {
         this.context = context;
         this.notifier = notifier;
         this.foregroundActive = foregroundActive;
+        Diag.init(context);
     }
 
     public void save(String result) {
-        Log.i("MarioAdDiag", "save: " + result);
+        Diag.i("MarioAdDiag", "save: " + result);
         context.getSharedPreferences("mario", Context.MODE_PRIVATE).edit()
                 .putString("last_result", result).apply();
         if (foregroundActive.getAsBoolean()) notifier.update(result);

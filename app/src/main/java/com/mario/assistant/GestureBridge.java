@@ -1,5 +1,7 @@
 package com.mario.assistant;
 
+import com.mario.assistant.infrastructure.ui.Diag;
+
 import android.accessibilityservice.AccessibilityService;
 import android.accessibilityservice.GestureDescription;
 import android.content.BroadcastReceiver;
@@ -10,7 +12,6 @@ import android.os.Binder;
 import android.os.Handler;
 import android.os.HandlerThread;
 import android.os.Process;
-import android.util.Log;
 
 /**
  * 仅限 adb（shell uid=2000）触发的调试手势桥：tap / swipe / back / arm / recover。
@@ -27,15 +28,16 @@ public final class GestureBridge extends BroadcastReceiver {
     private static Handler handler;
 
     @Override public void onReceive(Context context, Intent intent) {
-        Log.i(TAG, "onReceive action=" + (intent == null ? null : intent.getAction())
+        Diag.init(context);
+        Diag.i(TAG, "onReceive action=" + (intent == null ? null : intent.getAction())
                 + " uid=" + Binder.getCallingUid());
         if (intent == null || !"com.mario.assistant.GESTURE".equals(intent.getAction())) return;
         if (Binder.getCallingUid() != Process.SHELL_UID) return; // 仅 adb shell
         TaskService service = TaskService.connected();
-        Log.i(TAG, "service connected=" + (service != null));
+        Diag.i(TAG, "service connected=" + (service != null));
         String type = intent.getStringExtra("type");
         if (service == null || type == null) {
-            Log.i(TAG, "bridge unavailable: service=" + (service != null) + " type=" + type);
+            Diag.i(TAG, "bridge unavailable: service=" + (service != null) + " type=" + type);
             return;
         }
         synchronized (GestureBridge.class) {
@@ -64,7 +66,7 @@ public final class GestureBridge extends BroadcastReceiver {
         }
         handler.postDelayed(() -> {
             TaskService service = TaskService.connected();
-            Log.i(TAG, "queued gesture service=" + (service != null));
+            Diag.i(TAG, "queued gesture service=" + (service != null));
             if (service != null) exec(service, cmd);
         }, delayMs);
     }
@@ -74,22 +76,22 @@ public final class GestureBridge extends BroadcastReceiver {
         try {
             if ("arm".equals(type)) {
                 service.arm();
-                Log.i(TAG, "arm");
+                Diag.i(TAG, "arm");
                 return;
             }
             if ("recover".equals(type)) {
                 boolean ok = service.debugForestRecover();
-                Log.i(TAG, "recover ok=" + ok);
+                Diag.i(TAG, "recover ok=" + ok);
                 return;
             }
             if ("collect".equals(type)) {
                 boolean ok = service.debugForestCollect();
-                Log.i(TAG, "collect ok=" + ok);
+                Diag.i(TAG, "collect ok=" + ok);
                 return;
             }
             if ("back".equals(type)) {
                 boolean ok = service.performGlobalAction(android.accessibilityservice.AccessibilityService.GLOBAL_ACTION_BACK);
-                Log.i(TAG, "back ok=" + ok);
+                Diag.i(TAG, "back ok=" + ok);
                 return;
             }
             Path path = new Path();
@@ -107,22 +109,22 @@ public final class GestureBridge extends BroadcastReceiver {
                 path.moveTo(x1, y1);
                 path.lineTo(x2, y2);
             } else {
-                Log.i(TAG, "unknown type=" + type);
+                Diag.i(TAG, "unknown type=" + type);
                 return;
             }
             GestureDescription gesture = new GestureDescription.Builder()
                     .addStroke(new GestureDescription.StrokeDescription(path, 0, dur)).build();
             boolean accepted = service.dispatchGesture(gesture, new AccessibilityService.GestureResultCallback() {
                 @Override public void onCompleted(GestureDescription g) {
-                    Log.i(TAG, "gesture completed");
+                    Diag.i(TAG, "gesture completed");
                 }
                 @Override public void onCancelled(GestureDescription g) {
-                    Log.i(TAG, "gesture cancelled");
+                    Diag.i(TAG, "gesture cancelled");
                 }
             }, handler);
-            Log.i(TAG, type + " accepted=" + accepted);
+            Diag.i(TAG, type + " accepted=" + accepted);
         } catch (RuntimeException e) {
-            Log.i(TAG, type + " failed: " + e);
+            Diag.i(TAG, type + " failed: " + e);
         }
     }
 }

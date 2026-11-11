@@ -14,17 +14,25 @@ import java.util.Map;
  * 因此「进入次数」不能单独当作「状态没推进」的判据：累计型任务第 4、5 次进入都是
  * 合法进展（真机第 4 次被上限 3 掐断时，屏幕上正好是 3 个里程碑勾）。真正该停的是
  * 「进去了却始终没走到广告页」以及累计型任务打到硬上限。
+ *
+ * 「限时广告加点」同样是累计型：每支广告走完会切到「去阅读」解锁下一支，一轮就是
+ * 3 个广告 + 1 次阅读，真机第 4 次进入被判一次性预算 3 次误停；按用户要求放宽到 20 次。
  */
 public final class TaskEntryBudget {
     /** 一次性任务的进入上限。 */
     public static final int MAX_ENTRIES = 3;
     /** 累计型任务的进入上限：真机里程碑为 9 档，留三次余量。 */
     public static final int MAX_CUMULATIVE_ENTRIES = 12;
+    /** 限时广告加点：每条广告后还要阅读解锁，单轮就会进入 4 次以上。 */
+    public static final int MAX_LIMITED_AD_ENTRIES = 20;
     /** 连续多少次「进去了却没走到广告页」判定为状态未推进。 */
     public static final int MAX_STALLED_ENTRIES = 2;
 
+    /** 限时广告加点的归一化标题（OCR 装饰符号已由定位器去掉）。 */
+    public static final String LIMITED_AD_TITLE = "限时广告加点";
+
     /** 累计型任务标题：每轮广告推进一档，按钮不会变成「已领取」。 */
-    private static final String[] CUMULATIVE_TITLES = {"激励任务", "完成3个广告任务得奖励"};
+    private static final String[] CUMULATIVE_TITLES = {LIMITED_AD_TITLE, "激励任务", "完成3个广告任务得奖励"};
 
     private static final class Stat {
         int entries;
@@ -40,14 +48,16 @@ public final class TaskEntryBudget {
     }
 
     public static int maxEntries(String title) {
+        if (LIMITED_AD_TITLE.equals(title)) return MAX_LIMITED_AD_ENTRIES;
         return isCumulative(title) ? MAX_CUMULATIVE_ENTRIES : MAX_ENTRIES;
     }
 
     /** 记录一次进入；返回 false 表示本条任务行已达预算，调用方应停止。 */
     public boolean tryEnter(String title) {
         Stat stat = stat(title);
+        if (stat.entries >= maxEntries(title) || stat.stalled >= MAX_STALLED_ENTRIES) return false;
         stat.entries++;
-        return stat.entries <= maxEntries(title) && stat.stalled < MAX_STALLED_ENTRIES;
+        return true;
     }
 
     /** 本轮确实走到了广告页：清零「连续空进」计数。 */

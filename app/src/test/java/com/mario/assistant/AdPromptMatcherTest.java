@@ -100,6 +100,20 @@ public class AdPromptMatcherTest {
         TextBlock second = new TextBlock("去逛逛", 497, 2140, 693, 2193);
         assertNull(AdPromptMatcher.findDetails(Arrays.asList(second, action, adMark), W, H));
     }
+    @Test public void picksVideoActionWhenOcrMergesDisclosureWithTrailingCopy() {
+        // 真机实测（2026-11-11，ANA 视频广告）：披露行被并成
+        // “进入详倩页或第三方应用后,广告继续计时”，严格模板不成立，视频态兜底又把它
+        // 当成第二个候选，导致「点击了解详情」每帧被放弃、stage 1 空转到超时。
+        TextBlock merged = new TextBlock("进入详倩页或第三方应用后,广告继续计时", 360, 2261, 840, 2304);
+        TextBlock creative = new TextBlock("ANA小程序上线,多重优惠来袭!", 300, 1962, 900, 2010);
+        TextBlock action = new TextBlock("点击了解详情", 470, 2168, 730, 2223);
+        TextBlock adMark = new TextBlock("广告", 1071, 2363, 1131, 2398);
+        assertSame(action, AdPromptMatcher.findDetails(
+                Arrays.asList(creative, action, merged, adMark), W, H));
+        // 严格模板仍只认 11 字披露行，避免把广告素材里的普通长句当成披露行。
+        assertNull(AdPromptMatcher.findDetails(Arrays.asList(PROMPT, merged, ACTION), W, H));
+    }
+
     @Test public void matchesWeChatBrowseLabelWithObservedMisreadFromLiveFrame() {
         // 真机实测：vivo 广告视频播放态——按钮“去微信看看”被 ML Kit 误读为“去徽信看看”；
         // 广告素材内嵌的“查看详情@1985”位于按钮区之外（top < 3/4 高度），被几何规则排除。

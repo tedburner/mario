@@ -40,8 +40,9 @@ public final class AdCarouselPolicy {
             String text = box.text.replace(" ", "");
             // ML Kit 实测会把“恭喜获得”误读为“恭套获得”，不能只认完整“恭喜”。
             if (text.contains("恭") || text.contains("获得")) rewardDialog = true;
-            // OCR 可能带标点或误识，按“知道”包含匹配；必须伴随奖励文案，避免误点其他页面的提示。
-            if (!text.contains("知道")) continue;
+            // 必须完整“知道了”：真机美团素材“别人都不知道的美团”+“看15秒可获得奖励”
+            // 曾同时满足两个条件，被误当成奖励弹窗按钮导致流程停止。
+            if (!text.contains("知道了")) continue;
             if (found != null) return null;
             found = box;
         }

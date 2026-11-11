@@ -1,5 +1,7 @@
 package com.mario.assistant;
 
+import com.mario.assistant.infrastructure.ui.Diag;
+
 import android.accessibilityservice.AccessibilityServiceInfo;
 import android.animation.Animator;
 import android.animation.AnimatorListenerAdapter;
@@ -18,7 +20,6 @@ import android.os.Handler;
 import android.os.Looper;
 import android.os.PowerManager;
 import android.provider.Settings;
-import android.util.Log;
 import android.view.Gravity;
 import android.view.View;
 import android.view.accessibility.AccessibilityManager;
@@ -54,6 +55,7 @@ public final class MainActivity extends Activity {
 
     @Override public void onCreate(Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
+        Diag.init(this);
         prefs = getSharedPreferences("mario", MODE_PRIVATE);
         getWindow().setStatusBarColor(MarioTheme.SKY);
         getWindow().setNavigationBarColor(MarioTheme.SKY);
@@ -523,10 +525,10 @@ public final class MainActivity extends Activity {
                     "checkOpNoThrow", int.class, int.class, String.class);
             Object result = check.invoke(ops, 10021, android.os.Process.myUid(), getPackageName());
             if (!(result instanceof Integer)) return null;
-            Log.i("MarioAdDiag", "miui op 10021 mode=" + result);
+            Diag.i("MarioAdDiag", "miui op 10021 mode=" + result);
             return (Integer) result == AppOpsManager.MODE_ALLOWED;
         } catch (Exception e) {
-            Log.i("MarioAdDiag", "miui op 10021 unavailable: " + e);
+            Diag.i("MarioAdDiag", "miui op 10021 unavailable: " + e);
             return null;
         }
     }

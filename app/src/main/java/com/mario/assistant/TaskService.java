@@ -13,6 +13,7 @@ import com.mario.assistant.infrastructure.a11y.UiActions;
 import com.mario.assistant.infrastructure.a11y.UiTreeSource;
 import com.mario.assistant.infrastructure.ocr.MlKitTextReader;
 import com.mario.assistant.infrastructure.system.DeviceEnvironment;
+import com.mario.assistant.infrastructure.ui.Diag;
 import com.mario.assistant.infrastructure.ui.RunLog;
 import com.mario.assistant.infrastructure.ui.StatusNotifier;
 
@@ -23,7 +24,6 @@ import android.view.Display;
 import android.os.Handler;
 import android.os.HandlerThread;
 import android.os.SystemClock;
-import android.util.Log;
 import android.view.accessibility.AccessibilityEvent;
 
 /**
@@ -46,7 +46,8 @@ public final class TaskService extends AccessibilityService implements RunHost {
     private volatile boolean foregroundActive;
 
     @Override protected void onServiceConnected() {
-        Log.i("MarioAdDiag", "onServiceConnected");
+        Diag.init(this);
+        Diag.i("MarioAdDiag", "onServiceConnected");
         if (scanThread == null) {
             scanThread = new HandlerThread("mario-scan");
             scanThread.start();
@@ -122,16 +123,16 @@ public final class TaskService extends AccessibilityService implements RunHost {
                 startForeground(StatusNotifier.NOTIFICATION_ID, notification);
             }
             foregroundActive = true;
-            Log.i("MarioAdDiag", "startForeground ok");
+            Diag.i("MarioAdDiag", "startForeground ok");
         } catch (RuntimeException e) {
-            Log.i("MarioAdDiag", "startForeground failed: " + e.getMessage());
+            Diag.i("MarioAdDiag", "startForeground failed: " + e.getMessage());
         }
     }
     private void stopRunForeground() {
         if (!foregroundActive) return;
         foregroundActive = false;
         stopForeground(true);
-        Log.i("MarioAdDiag", "stopForeground");
+        Diag.i("MarioAdDiag", "stopForeground");
     }
     /** 仅调试桥使用：直接进入恢复流程，验证从支付宝内页/背包回到奖励页。 */
     boolean debugForestRecover() {
@@ -166,10 +167,10 @@ public final class TaskService extends AccessibilityService implements RunHost {
     @Override public void onInterrupt() {
         // 该回调可能在手势跨应用窗口切换时由系统触发且不代表能力被收回；
         // 只记录不停机，真实能力丧失由后续截图/手势失败的兜底路径如实停止。
-        Log.i("MarioAdDiag", "onInterrupt");
+        Diag.i("MarioAdDiag", "onInterrupt");
     }
     @Override public void onDestroy() {
-        Log.i("MarioAdDiag", "onDestroy");
+        Diag.i("MarioAdDiag", "onDestroy");
         if (scanHandler != null) {
             if (coordinator != null) coordinator.detach();
         }

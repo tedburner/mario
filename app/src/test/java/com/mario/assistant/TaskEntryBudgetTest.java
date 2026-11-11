@@ -13,7 +13,22 @@ public class TaskEntryBudgetTest {
             budget.recordProgress("做任务领惊喜福利");
         }
         assertFalse("超出预算应停止", budget.tryEnter("做任务领惊喜福利"));
-        assertEquals(TaskEntryBudget.MAX_ENTRIES + 1, budget.entries("做任务领惊喜福利"));
+        // 被拒绝的尝试不计入实际进入次数，停止文案才不会多报一次。
+        assertEquals(TaskEntryBudget.MAX_ENTRIES, budget.entries("做任务领惊喜福利"));
+    }
+
+    @Test public void limitedTimeAdTaskAllowsTwentyEntries() {
+        // 用户指定：限时广告加点按累计任务处理，上限 20 次（每支广告后还要阅读解锁）。
+        TaskEntryBudget budget = new TaskEntryBudget();
+        assertTrue(TaskEntryBudget.isCumulative("限时广告加点"));
+        assertEquals(TaskEntryBudget.MAX_LIMITED_AD_ENTRIES, TaskEntryBudget.maxEntries("限时广告加点"));
+        for (int i = 0; i < TaskEntryBudget.MAX_LIMITED_AD_ENTRIES; i++) {
+            assertTrue("第 " + (i + 1) + " 次进入应放行", budget.tryEnter("限时广告加点"));
+            budget.recordProgress("限时广告加点");
+        }
+        assertEquals(20, TaskEntryBudget.MAX_LIMITED_AD_ENTRIES);
+        assertFalse("达到 20 次后停止", budget.tryEnter("限时广告加点"));
+        assertEquals(TaskEntryBudget.MAX_LIMITED_AD_ENTRIES, budget.entries("限时广告加点"));
     }
 
     @Test public void cumulativeTaskKeepsGoingThroughMilestones() {
