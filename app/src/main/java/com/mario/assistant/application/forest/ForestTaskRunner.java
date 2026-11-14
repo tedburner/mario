@@ -15,6 +15,7 @@ import com.mario.assistant.domain.model.UiNode;
 import com.mario.assistant.domain.safety.ActionGuard;
 import com.mario.assistant.infrastructure.a11y.UiTree;
 import com.mario.assistant.infrastructure.system.DeviceEnvironment;
+import com.mario.assistant.infrastructure.ui.Diag;
 import java.util.List;
 
 /** 蚂蚁森林奖励页任务：动态解析任务行，逐个浏览/领取并自动回到奖励页。 */
@@ -38,8 +39,11 @@ public final class ForestTaskRunner implements TaskRunner {
     private ActionGate gate;
     private boolean finished;
 
+    private static final String TAG = "MarioAdDiag";
     private int stage; // 0=找任务, 1=点击后观察, 2=等待返回奖励页, 3=抽奖页识别, 4=第三方滞留后恢复
     private long deadline;
+    /** 本 run 启动时刻：finish 行带 run=Ns，复盘不用再手推时间戳。 */
+    private long startedAtMs;
     private long stageAt;
     private String taskTitle;
     private String taskCta;
@@ -90,6 +94,7 @@ public final class ForestTaskRunner implements TaskRunner {
         this.token = token;
         this.gate = new ActionGate(host.log(), token);
         long now = host.now();
+        startedAtMs = now;
         if (mode == Mode.DEBUG_RECOVER) {
             taskTitle = "(调试恢复)";
             deadline = now + 2 * 60 * 1000;
@@ -842,6 +847,7 @@ public final class ForestTaskRunner implements TaskRunner {
     private void stop(String reason) {
         if (finished) return;
         finished = true;
+        Diag.i(TAG, "finish run=" + (host.now() - startedAtMs) / 1000 + "s " + reason);
         log(reason);
         host.stopForeground();
     }

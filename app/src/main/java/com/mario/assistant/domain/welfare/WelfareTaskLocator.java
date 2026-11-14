@@ -44,6 +44,7 @@ public final class WelfareTaskLocator {
         for (String title : ROW_TITLES) {
             TextBlock titleBox = soleTitle(boxes, title);
             if (titleBox == null && "去携程签到领积分".equals(title)) titleBox = soleCtripSigninTitle(boxes);
+            if (titleBox == null && "完成3个广告任务得奖励".equals(title)) titleBox = soleThreeAdsTitle(boxes);
             if (titleBox == null) continue;
             if ("去携程签到领积分".equals(title)) {
                 // 真机 ML Kit 把该行按钮读成“领奖励”（其余行是“去完成”）；文案不可靠，
@@ -126,6 +127,24 @@ public final class WelfareTaskLocator {
             if (box == null || box.text == null) continue;
             String text = box.text.replace(" ", "");
             if (!text.contains("携程") || !text.contains("签到")) continue;
+            if (found != null) return null;
+            found = box;
+        }
+        return found;
+    }
+
+    /**
+     * 「完成3个广告任务得奖励」标题容忍 OCR 变形：真机 ML Kit 会把“广告”读成
+     * “广广告”（34 帧）或插入“厂”字，精确 equals 匹配失败导致整行被跳过、
+     * 直接落到下一优先级的携程行（真机 2026-11-14 09:02 做完第 1 个广告就去做携程了）。
+     * 用“3个广 + 任务得奖励”双片段定位，不会误中「完成1个广告任务得奖励」等相邻行。
+     */
+    private static TextBlock soleThreeAdsTitle(List<TextBlock> boxes) {
+        TextBlock found = null;
+        for (TextBlock box : boxes) {
+            if (box == null || box.text == null) continue;
+            String text = box.text.replace(" ", "");
+            if (!text.contains("3个广") || !text.contains("任务得奖励")) continue;
             if (found != null) return null;
             found = box;
         }

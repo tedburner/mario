@@ -13,6 +13,8 @@ public final class RunCoordinator {
     private final AtomicInteger generation = new AtomicInteger();
     private volatile TaskRunner active;
     private long lastTickAt;
+    /** 当前 run 的启动时刻；用于「覆盖旧 run」时在日志里留下被覆盖方的运行时长。 */
+    private long runStartedAt;
     /** 一键自动化的待执行队列：当前任务自行收尾后按序接续；停止/异常/手动切换都会清空。 */
     private final ArrayDeque<TaskRunner> pending = new ArrayDeque<>();
     private final Runnable loop = new Runnable() {
@@ -58,11 +60,20 @@ public final class RunCoordinator {
     }
 
     private void activate(TaskRunner runner) {
-        if (active != null) detach();
+        TaskRunner old = active;
+        if (old != null) {
+            // 覆盖旧 run 不留任何记录会让日志里出现"有 start 无 finish"的悬空段，
+            // 无法区分被覆盖/异常（真机 2026-11-12 41 分钟 welfare run 就是这么丢的）。
+            long elapsed = runStartedAt > 0 ? host.now() - runStartedAt : -1;
+            Diag.i("MarioAdDiag", "run replaced old=" + old.id()
+                    + (elapsed >= 0 ? " elapsed=" + elapsed + "ms" : ""));
+            detach();
+        }
         host.startForeground();
         int next = generation.incrementAndGet();
         active = runner;
         lastTickAt = 0;
+        runStartedAt = host.now();
         Diag.i("MarioAdDiag", "run start id=" + runner.id() + " tick=" + runner.tickIntervalMs()
                 + " pending=" + pending.size());
         runner.onStart(host, new RunToken(next, generation::get));

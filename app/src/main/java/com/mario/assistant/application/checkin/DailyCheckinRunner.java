@@ -39,6 +39,12 @@ public final class DailyCheckinRunner implements TaskRunner {
     /** 每次点击后等页面响应，避免把上一个页面的按钮再点一次。 */
     private static final long TAP_SETTLE_MS = 4000;
     private static final int MAX_ACTION_TAPS = 2;
+    /** 签到页被活动弹窗盖住时最多点几次通用关闭按钮（真机 E充站「每日签到赢好礼/好的」）。 */
+    private static final int MAX_DISMISS_TAPS = 3;
+    /** 收尾子阶段总预算：领奖+关弹窗超时也照常切下一个 APP，不拖垮整轮。 */
+    private static final long WRAPUP_TIMEOUT_MS = 12000;
+    private static final int MAX_WRAPUP_CLAIMS = 2;
+    private static final int MAX_WRAPUP_DISMISSALS = 4;
 
     private RunHost host;
     private RunToken token;
@@ -56,10 +62,20 @@ public final class DailyCheckinRunner implements TaskRunner {
     private long phaseAt;
     private long lastTapAt;
     private int actionTaps;
-    private int phase;     // 0=等前台 1=找入口 2=签到页动作/确认
+    private int phase;     // 0=等前台 1=找入口 2=签到页动作/确认（收尾用独立 wrapup 标记）
     private int entryStep; // 0=首页入口/弹窗 1=底部标签 2=标签页入口
     private TextBlock priorTarget;
     private int priorWidth, priorHeight;
+    /** 签到页内已点掉的遮挡弹窗次数。 */
+    private int dismissTaps;
+    /** 收尾子阶段状态：完成标记出现后先点「打开/领取」再关弹窗，两帧干净才算走完。 */
+    private boolean wrapup;
+    private long wrapupAt;
+    private int wrapupClaims;
+    private int wrapupDismissals;
+    private int wrapupIdleFrames;
+    /** 本 run 启动时刻：finish 行带 run=Ns，复盘不用再手推时间戳。 */
+    private long startedAtMs;
 
     @Override public String id() { return "checkin"; }
 
@@ -73,6 +89,7 @@ public final class DailyCheckinRunner implements TaskRunner {
         this.host = host;
         this.token = token;
         this.gate = new ActionGate(host.log(), token);
+        startedAtMs = host.now();
         apps = CheckinApps.all();
         index = 0;
         StringBuilder names = new StringBuilder();
@@ -140,8 +157,13 @@ public final class DailyCheckinRunner implements TaskRunner {
             phaseAt = now;
             appDeadline = now + APP_TIMEOUT_MS;
             actionTaps = 0;
+            dismissTaps = 0;
             lastTapAt = 0;
             priorTarget = null;
+            wrapup = false;
+            wrapupClaims = 0;
+            wrapupDismissals = 0;
+            wrapupIdleFrames = 0;
             log("每日签到：正在打开「" + app.name + "」。");
             return;
         }
@@ -181,12 +203,18 @@ public final class DailyCheckinRunner implements TaskRunner {
         }
         Diag.i(TAG, "checkin app=" + app.name + " phase=" + phase + " step=" + entryStep
                 + " ocr=" + CheckinPolicy.describe(boxes));
+        if (wrapup) {
+            handleWrapup(boxes, width, height, capturedAt);
+            return;
+        }
         if (CheckinPolicy.isDone(boxes)) {
             doneCount++;
             String status = lastTapAt > 0 ? "签到完成" : "今日已签到";
             results.add(app.name + "：" + status);
             log("每日签到：「" + app.name + "」" + status + "。");
-            nextApp(host.now());
+            // 完成标记常出现在成功弹窗上（比亚迪「签到成功+打开」）：进入收尾先领奖/关弹窗，
+            // 不能直接切下一个 APP 把奖励留在弹窗里（真机 2026-11-12/11-13 连签奖励漏领）。
+            enterWrapup(host.now());
             return;
         }
         if (phase == 1) handleEntry(boxes, width, height, capturedAt);
@@ -266,7 +294,30 @@ public final class DailyCheckinRunner implements TaskRunner {
                 : CheckinPolicy.findAction(boxes);
         if (button == null) {
             priorTarget = null;
-            return; // 等完成标记出现，或超时如实报未确认
+            // 活动弹窗盖住签到页（真机 2026-11-13 E充站「每日签到赢好礼/好的」盖住日历 46 秒
+            // 后超时跳过）：点掉通用关闭按钮再找主按钮，否则只能干等到超时。
+            TextBlock dismiss = CheckinPolicy.findWrapupDismiss(boxes);
+            if (dismiss == null || dismissTaps >= MAX_DISMISS_TAPS) {
+                return; // 等完成标记出现，或超时如实报未确认
+            }
+            if (now - lastTapAt < TAP_SETTLE_MS) return;
+            if (!stable(dismiss, width, height, capturedAt)) {
+                priorTarget = dismiss;
+                priorWidth = width;
+                priorHeight = height;
+                return;
+            }
+            priorTarget = null;
+            if (!allow(ActionGuard.Surface.CHECKIN_DISMISS, dismiss.text)) {
+                recordUnsure("弹窗按钮「" + dismiss.text + "」被安全策略拒绝");
+                nextApp(now);
+                return;
+            }
+            dismissTaps++;
+            lastTapAt = now;
+            tap(dismiss, "每日签到：已点击「" + dismiss.text + "」关闭遮挡弹窗。",
+                    "「" + dismiss.text + "」点击被中断");
+            return;
         }
         if (now - lastTapAt < TAP_SETTLE_MS) return;
         if (actionTaps >= MAX_ACTION_TAPS) return;
@@ -286,6 +337,76 @@ public final class DailyCheckinRunner implements TaskRunner {
         lastTapAt = now;
         tap(button, "每日签到：已点击「" + app.name + "」「" + button.text + "」。",
                 "「" + button.text + "」点击被中断");
+    }
+
+    /** 进入收尾子阶段：优先点「打开/领取」领奖，再逐层关弹窗，连续两帧干净即切下一个 APP。 */
+    private void enterWrapup(long now) {
+        wrapup = true;
+        wrapupAt = now;
+        wrapupClaims = 0;
+        wrapupDismissals = 0;
+        wrapupIdleFrames = 0;
+        priorTarget = null;
+    }
+
+    /**
+     * 收尾子阶段的 OCR 处理：只碰 {@link ActionGuard.Surface#CHECKIN_DISMISS} 白名单按钮，
+     * 都点不到（连续两帧干净）或超时就切下一个 APP——签到已完成，收尾失败不回滚结论。
+     */
+    private void handleWrapup(List<TextBlock> boxes, int width, int height, long capturedAt) {
+        long now = host.now();
+        if (now - wrapupAt >= WRAPUP_TIMEOUT_MS) {
+            log("每日签到：「" + app.name + "」收尾弹窗未清完，继续下一个 APP。");
+            wrapup = false;
+            nextApp(now);
+            return;
+        }
+        if (now - lastTapAt < TAP_SETTLE_MS) return;
+        TextBlock claim = CheckinPolicy.findWrapupClaim(boxes);
+        if (claim != null && wrapupClaims < MAX_WRAPUP_CLAIMS) {
+            if (!stable(claim, width, height, capturedAt)) {
+                priorTarget = claim;
+                priorWidth = width;
+                priorHeight = height;
+                return;
+            }
+            priorTarget = null;
+            if (!allow(ActionGuard.Surface.CHECKIN_DISMISS, claim.text)) {
+                wrapup = false;
+                nextApp(now);
+                return;
+            }
+            wrapupClaims++;
+            lastTapAt = now;
+            tap(claim, "每日签到：「" + app.name + "」已点击「" + claim.text + "」领取奖励。",
+                    "「" + claim.text + "」点击被中断");
+            return;
+        }
+        TextBlock dismiss = CheckinPolicy.findWrapupDismiss(boxes);
+        if (dismiss != null && wrapupDismissals < MAX_WRAPUP_DISMISSALS) {
+            if (!stable(dismiss, width, height, capturedAt)) {
+                priorTarget = dismiss;
+                priorWidth = width;
+                priorHeight = height;
+                return;
+            }
+            priorTarget = null;
+            if (!allow(ActionGuard.Surface.CHECKIN_DISMISS, dismiss.text)) {
+                wrapup = false;
+                nextApp(now);
+                return;
+            }
+            wrapupDismissals++;
+            lastTapAt = now;
+            tap(dismiss, "每日签到：「" + app.name + "」已点击「" + dismiss.text + "」关闭弹窗。",
+                    "「" + dismiss.text + "」点击被中断");
+            return;
+        }
+        // 没有可点的弹窗按钮：连续两帧干净视为收尾完成。
+        if (++wrapupIdleFrames >= 2) {
+            wrapup = false;
+            nextApp(now);
+        }
     }
 
     private boolean stable(TextBlock target, int width, int height, long capturedAt) {
@@ -346,6 +467,7 @@ public final class DailyCheckinRunner implements TaskRunner {
         finished = true;
         Diag.i(TAG, "finish done=" + doneCount + " unsure=" + unsureCount
                 + " skipped=" + skippedCount + " index=" + index + "/" + apps.size()
+                + " run=" + (host.now() - startedAtMs) / 1000 + "s"
                 + " result=" + result);
         log(result);
         host.stopForeground();

@@ -37,6 +37,11 @@ public final class Diag {
     private static boolean headerWritten;
     private static boolean handlerInstalled;
     private static boolean initFailed;
+    /** 连续重复折叠：同 level+tag 同文本只落首条，跳出的第一条前补记重复数（复盘时 OCR 全屏
+     * dump 曾同一画面连打 22 帧、scan 心跳每 tick 一条，价值密度极低）。审计语义不丢：条数保留。 */
+    private static String foldedKey;
+    private static String foldedMsg;
+    private static int foldedCount;
 
     private Diag() {}
 
@@ -95,8 +100,33 @@ public final class Diag {
             if (file.length() >= MAX_BYTES) {
                 rotateIfNeeded(file.getParentFile());
             }
+            String key = level + "/" + tag;
+            if (key.equals(foldedKey) && msg != null && msg.equals(foldedMsg)) {
+                foldedCount++;
+                // 心跳：长时间卡在同一画面时保留时长感知（否则结尾的重复段不会落盘）。
+                if (foldedCount % 20 == 0) {
+                    appendLocked(level, tag, "┈ 与上一条相同（已连续 " + foldedCount + " 条，略）");
+                }
+                return;
+            }
+            flushFoldedLocked();
+            foldedKey = key;
+            foldedMsg = msg;
+            foldedCount = 1;
             appendLocked(level, tag, msg);
         }
+    }
+
+    /** 折叠系列结束（来了不同消息/滚动文件）：补一条重复计数，让「省略了多少条」可审计。 */
+    private static void flushFoldedLocked() {
+        if (foldedCount > 1 && foldedKey != null) {
+            int slash = foldedKey.indexOf('/');
+            appendLocked(foldedKey.substring(0, slash), foldedKey.substring(slash + 1),
+                    "┈ 上一条重复 " + (foldedCount - 1) + " 次，略");
+        }
+        foldedKey = null;
+        foldedMsg = null;
+        foldedCount = 0;
     }
 
     private static void appendLocked(String level, String tag, String msg) {
@@ -114,6 +144,7 @@ public final class Diag {
     private static void rotateIfNeeded(File dir) {
         if (file == null || dir == null) return;
         if (!file.exists() || file.length() < MAX_BYTES) return;
+        flushFoldedLocked(); // 新文件从干净状态开始，避免开头出现悬空的重复计数
         int last = KEEP_FILES - 1;
         new File(dir, "mario." + last + ".log").delete();
         for (int i = last - 1; i >= 1; i--) {

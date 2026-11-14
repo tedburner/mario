@@ -6,7 +6,11 @@ package com.mario.assistant.domain.safety;
  * 「找能量」页只允许「一键收」，「立即签到」只允许签到入口。
  */
 public final class ActionGuard {
-    public enum Surface { TASK_ROW, AD_PROMPT, SIGNIN, CLAIM, ENERGY_PAGE, DIALOG, NAVIGATION, CHECKIN }
+    public enum Surface {
+        TASK_ROW, AD_PROMPT, SIGNIN, CLAIM, ENERGY_PAGE, DIALOG, NAVIGATION, CHECKIN,
+        /** 签到收尾专用：完成标记出现后，成功弹窗上的领奖/关闭按钮。 */
+        CHECKIN_DISMISS
+    }
 
     public static final class Decision {
         public final boolean allowed;
@@ -34,6 +38,15 @@ public final class ActionGuard {
     private static final String[] CHECKIN_LABELS = {"签到", "立即签到", "去签到", "签到福利"};
     /** 日历型签到页（E充站）签到动作就是「今天」格，单独放行这一个文案。 */
     private static final String[] CHECKIN_TODAY = {"今天"};
+    /**
+     * 签到收尾阶段的弹窗按钮：只有运行器在「完成标记已出现」或「找不到签到按钮但有遮挡弹窗」
+     * 时才会走到这个闸门，普通签到流程不会触碰，避免把推广页的「打开」当成签到入口误点。
+     * 全部精确文案；「打开」用于比亚迪连签奖励弹窗（真机 2026-11-12/11-13「签到成功+打开」，
+     * 此前每轮都把奖励留在弹窗里不领）。
+     */
+    private static final String[] CHECKIN_DISMISS_LABELS = {
+            "打开", "领取", "领取奖励", "好的", "我知道了", "知道了", "关闭", "收下", "开心收下"
+    };
 
     private ActionGuard() { }
 
@@ -52,6 +65,12 @@ public final class ActionGuard {
                 if (allowed.equals(text)) return Decision.allow("日历签到今天格");
             }
             return Decision.deny("每日签到只允许已知签到文案");
+        }
+        if (surface == Surface.CHECKIN_DISMISS) {
+            for (String allowed : CHECKIN_DISMISS_LABELS) {
+                if (allowed.equals(text)) return Decision.allow("签到收尾弹窗按钮");
+            }
+            return Decision.deny("签到收尾只允许已知领奖/关闭文案");
         }
         if (surface == Surface.CLAIM) {
             for (String allowed : CLAIM_LABELS) {

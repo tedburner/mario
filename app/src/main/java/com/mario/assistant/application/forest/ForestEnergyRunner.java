@@ -12,6 +12,7 @@ import com.mario.assistant.domain.safety.ActionGuard;
 import com.mario.assistant.infrastructure.a11y.Gestures;
 import com.mario.assistant.infrastructure.a11y.UiTree;
 import com.mario.assistant.infrastructure.system.DeviceEnvironment;
+import com.mario.assistant.infrastructure.ui.Diag;
 import java.util.ArrayList;
 import java.util.List;
 
@@ -30,6 +31,7 @@ public final class ForestEnergyRunner implements TaskRunner {
     private static final int EMPTY_GRACE_FRAMES = 3;
     /** 点「找能量」后页面可能被奖励/活动弹窗盖住，先给足加载与弹窗出现的时间再判定离开。 */
     private static final int FRIEND_PAGE_GRACE_FRAMES = 5;
+    private static final String TAG = "MarioAdDiag";
 
     private RunHost host;
     private RunToken token;
@@ -39,6 +41,8 @@ public final class ForestEnergyRunner implements TaskRunner {
     /** 0=导航到森林主页 1=收自己能量 2=打开找能量 3=逐个好友 4=收尾 */
     private int stage;
     private long deadline;
+    /** 本 run 启动时刻：finish 行带 run=Ns，复盘不用再手推时间戳。 */
+    private long startedAtMs;
     private long stageAt;
     private long lastActionAt;
 
@@ -68,6 +72,7 @@ public final class ForestEnergyRunner implements TaskRunner {
         this.host = host;
         this.token = token;
         this.gate = new ActionGate(host.log(), token);
+        startedAtMs = host.now();
         deadline = host.now() + 10 * 60 * 1000;
         log("森林能量已启动：先收自己树上的能量，再进「找能量」逐个好友一键收。");
     }
@@ -392,6 +397,7 @@ public final class ForestEnergyRunner implements TaskRunner {
     private void stop(String reason) {
         if (finished) return;
         finished = true;
+        Diag.i(TAG, "finish run=" + (host.now() - startedAtMs) / 1000 + "s " + reason);
         log(reason);
         host.stopForeground();
     }

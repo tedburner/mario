@@ -16,6 +16,10 @@ public final class CheckinPolicy {
     /** 「签到成功」的形近字容错：中间一个字可能被 OCR 读错（成→戌/戍）。 */
     private static final java.util.regex.Pattern SUCCESS_PATTERN =
             java.util.regex.Pattern.compile("签到.功");
+    /** 收尾领奖按钮候选：与 ActionGuard.CHECKIN_DISMISS 白名单保持一致。 */
+    private static final String[] WRAPUP_CLAIM_LABELS = {"打开", "领取", "领取奖励"};
+    /** 收尾关闭按钮候选：与 ActionGuard.CHECKIN_DISMISS 白名单保持一致。 */
+    private static final String[] WRAPUP_DISMISS_LABELS = {"好的", "我知道了", "知道了", "关闭", "收下", "开心收下"};
 
     private CheckinPolicy() { }
 
@@ -82,6 +86,27 @@ public final class CheckinPolicy {
             if (SUCCESS_PATTERN.matcher(text).find()) return true;
         }
         return false;
+    }
+
+    /**
+     * 收尾阶段成功弹窗上的领奖按钮（真机比亚迪「签到成功→打开@550,1686」，此前每轮
+     * 判完「签到成功」就走人，奖励一直留在弹窗里）。按优先级取全屏唯一精确匹配。
+     */
+    public static TextBlock findWrapupClaim(List<TextBlock> boxes) {
+        for (String label : WRAPUP_CLAIM_LABELS) {
+            TextBlock found = uniqueExact(boxes, label, 0, Integer.MAX_VALUE, 0);
+            if (found != null) return found;
+        }
+        return null;
+    }
+
+    /** 收尾/遮挡弹窗的通用关闭按钮（E充站活动弹窗「好的@550,1924」曾把日历盖住 46 秒）。 */
+    public static TextBlock findWrapupDismiss(List<TextBlock> boxes) {
+        for (String label : WRAPUP_DISMISS_LABELS) {
+            TextBlock found = uniqueExact(boxes, label, 0, Integer.MAX_VALUE, 0);
+            if (found != null) return found;
+        }
+        return null;
     }
 
     /** 定位失败时的诊断输出：真机取证用，逐框列出文案与坐标。 */
