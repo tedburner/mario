@@ -47,6 +47,9 @@ public final class WelfareTaskRunner implements TaskRunner {
     private boolean navigationAttempted;
     private TextBlock priorReadingTarget;
     private int adSheetFrames;
+    /** stage 2 停在起点内的激励视频浮层上时，超时后重新点击「立即领取」的次数。 */
+    private int adSheetRetries;
+    private static final int MAX_AD_SHEET_RETRIES = 2;
     private TextBlock priorTabTarget;
     private int emptyScans;
     private int scrollAttempts;
@@ -89,6 +92,8 @@ public final class WelfareTaskRunner implements TaskRunner {
     /** 已确认回到起点后，前台再次被其他应用抢走的连续帧数与首帧时刻（判定用 8s 时间窗）。 */
     private int returnLostFrames;
     private long returnLostAt;
+    /** 以「请手动处理」类结果收尾：协调器据此不再接续串联队列中的下一棒。 */
+    private boolean chainBlocked;
     /** 同一条任务行在一次试运行内的进入预算，防止「行内状态未刷新」导致整轮反复。 */
     private final TaskEntryBudget entryBudget = new TaskEntryBudget();
     /** 本轮是广告任务行：只有它会向预算回报「是否真的走到了广告页」。 */
@@ -99,6 +104,9 @@ public final class WelfareTaskRunner implements TaskRunner {
     private int tabBacks;
     private int tabStuckFrames;
     private static final int MAX_TAB_BACKS = 2;
+    /** 起点停在吞返回键的广告/内页时，回桌面清栈重启起点的次数。 */
+    private int freshRestarts;
+    private static final int MAX_FRESH_RESTARTS = 2;
     /** stage 4「领取奖励」按钮的连续帧与点击次数（试玩任务页，真机 2026-11-12 08:31）。 */
     private int rewardClaimFrames;
     private int rewardClaimTaps;
@@ -106,10 +114,16 @@ public final class WelfareTaskRunner implements TaskRunner {
     /** stage 4 返回后仍停在广告详情页的连续帧与已执行动作数（真机 2026-11-13 08:36 BioGaia）。 */
     private int detailResidueFrames;
     private int detailResidueActions;
-    private static final int MAX_DETAIL_RESIDUE_ACTIONS = 3;
+    /** 关闭节点存在但点击无效的连续帧：节点在图文详情页上可能出现却点不动（真机 11-18/11-19）。 */
+    private int nodeStallFrames;
+    private static final int NODE_STALL_FRAMES = 4;
+    private static final int MAX_DETAIL_RESIDUE_ACTIONS = 4;
+    /** 广告链把前台留给支付宝等第三方时，stage 0 主动回桌面重开起点的连续帧与次数。 */
+    private int offQidianScans;
+    private int offQidianRecoveries;
+    private static final int MAX_QIDIAN_RECOVERIES = 3;
     /** 弹窗 OCR 抖动容忍：粘连框时有时无时不立刻清零双帧计数。 */
-    private int dialogMissFrames;
-    /** 弹窗 STOP 判定的连续帧：粘连是随机的，给 OCR 3 帧翻盘机会再停。 */
+    private int dialogMissFrames;    /** 弹窗 STOP 判定的连续帧：粘连是随机的，给 OCR 3 帧翻盘机会再停。 */
     private int dialogStopFrames;
     /** 本 run 启动时刻与工作量统计：finish 行带 run=Ns ads=N popups=N，复盘不用再手推时间戳。 */
     private long startedAtMs;
@@ -132,6 +146,8 @@ public final class WelfareTaskRunner implements TaskRunner {
     @Override public long initialDelayMs() { return 1000; }
 
     @Override public boolean isFinished() { return finished; }
+
+    @Override public boolean chainShouldContinue() { return !chainBlocked; }
 
     @Override public void onStart(RunHost host, RunToken token) {
         this.host = host;
@@ -317,7 +333,27 @@ public final class WelfareTaskRunner implements TaskRunner {
             } else if (!host.ocr().busy()) {
                 inspectScreen();
             }
+        } else if (stage == 0 && !QIDIAN.equals(pkg)) {
+            // 广告链收尾后前台可能停在支付宝等第三方（真机 19:26 百度地图→支付宝链）：
+            // 旧逻辑只等 Qidian 帧，会一直空转到 5 分钟总超时。
+            if (++offQidianScans >= 3) {
+                offQidianScans = 0;
+                if (offQidianRecoveries >= MAX_QIDIAN_RECOVERIES) {
+                    stop("已离开起点（前台：" + foregroundName() + "），重开起点 "
+                            + MAX_QIDIAN_RECOVERIES + " 次仍失败，已停止。");
+                    return;
+                }
+                offQidianRecoveries++;
+                host.env().home();
+                if (host.env().reopen(QIDIAN)) {
+                    log("已离开起点（前台：" + foregroundName() + "），正在重新打开起点。");
+                } else {
+                    stop("无法重新打开起点，请手动切换后重试。");
+                }
+            }
+            return;
         } else if (!host.ocr().busy() && root != null && QIDIAN.equals(pkg)) {
+            offQidianScans = 0;
             if (stage != 0 || !openReadingCenterIfNeeded(tree)) inspectScreen();
         }
     }
@@ -602,6 +638,7 @@ public final class WelfareTaskRunner implements TaskRunner {
         signinClaimFrames = 0;
         returnedFrames = 0;
         adSheetFrames = 0;
+        adSheetRetries = 0;
         unlockAttempts = 0;
         readingPhase = 0;
         priorReadingTarget = null;
@@ -623,6 +660,9 @@ public final class WelfareTaskRunner implements TaskRunner {
         rewardClaimTaps = 0;
         detailResidueFrames = 0;
         detailResidueActions = 0;
+        nodeStallFrames = 0;
+        offQidianScans = 0;
+        offQidianRecoveries = 0;
         adEntryAt = 0;
         adEntryRetries = 0;
         returnConfirmDeadline = 0;
@@ -663,7 +703,24 @@ public final class WelfareTaskRunner implements TaskRunner {
                 if (++tabStuckFrames < 2) return;
                 tabStuckFrames = 0;
                 if (tabBacks >= MAX_TAB_BACKS) {
-                    stop("未识别到起点标签栏，按返回键 " + MAX_TAB_BACKS + " 次仍无法回到主页面，已停止。");
+                    // 实测贴片广告 Activity 会吞返回键（真机 19:33 geTui 黑屏创意），
+                    // 只能回桌面后清栈重启起点，否则整轮都在广告页上空转。
+                    if (freshRestarts >= MAX_FRESH_RESTARTS) {
+                        stop("起点停留在广告或内页，返回键与重启均无效，已停止。");
+                        return;
+                    }
+                    freshRestarts++;
+                    host.env().home();
+                    if (host.env().launch(QIDIAN, true)) {
+                        tabBacks = 0;
+                        navigationAttempted = false;
+                        emptyScans = 0;
+                        scrollAttempts = 0;
+                        log("起点停留在广告或内页且返回键无效，正在重启起点（第 "
+                                + freshRestarts + " 次）。");
+                    } else {
+                        stop("无法重新打开起点，请手动切换后重试。");
+                    }
                     return;
                 }
                 tabBacks++;
@@ -812,7 +869,11 @@ public final class WelfareTaskRunner implements TaskRunner {
         returnConfirmed = false;
         returnFallbackStep = 0;
         returnLostFrames = 0;
-        adTransitionDeadline = now + 30000;
+        detailResidueFrames = 0;
+        nodeStallFrames = 0;
+        // 45s：广告落地页自身的读秒/倒计时结束后关闭按钮才出现（真机 2026-11-17 实测
+        // 切回到成功关闭需 26-28s），30s 时限会让第三支广告恰好在边界被掐断。
+        adTransitionDeadline = now + 45000;
         returnConfirmDeadline = confirmDelayMs > 0 ? now + confirmDelayMs : 0;
     }
 
@@ -834,9 +895,22 @@ public final class WelfareTaskRunner implements TaskRunner {
 
     /** stage 2 且前台仍在起点：广告底部操作区连续两帧消失即确认起点内落地页；若已回到福利中心则如实停止。 */
     private void handleStageTwoOcr(List<TextBlock> boxes, int imageWidth, int imageHeight) {
+        if (AdPromptMatcher.hasReward(boxes)) {
+            // 激励视频在起点自己的广告 Activity 内播完会直接弹奖励（不跳第三方）：
+            // 按「已进入详情页并返回」收口，交给 stage 4 的残留关闭逻辑。
+            adFlow.observeDetailInApp(host.now());
+            adFlow.returnRequested();
+            beginReturnConfirmation(host.now(), 0);
+            log("广告已在起点内播放完成并显示奖励，等待关闭。");
+            return;
+        }
         boolean sheetPresent = AdPromptMatcher.findDisclosure(boxes) != null
                 || AdPromptMatcher.findDetails(boxes, imageWidth, imageHeight) != null;
-        if (sheetPresent) { adSheetFrames = 0; return; }
+        if (sheetPresent) {
+            adSheetFrames = 0;
+            if (host.now() >= adTransitionDeadline) retryAdSheet(boxes, imageWidth, imageHeight);
+            return;
+        }
         if (WelfareTaskLocator.find(boxes, imageWidth) != null) {
             stop("广告点击后回到了福利中心，未打开详情页；请手动核对任务状态。");
             return;
@@ -847,6 +921,33 @@ public final class WelfareTaskRunner implements TaskRunner {
             adRoundProgressed = true;
             log("已在起点内打开广告详情页，停留 15 秒后将自动返回。");
         }
+    }
+
+    /**
+     * stage 2 在起点内的激励视频浮层上超时不跳转（真机 19:33 geTui 贴片广告：
+     * 点击「立即领取」后前台一直停在 RewardvideoPortraitADActivity）：重新点一次按钮。
+     * 原先这里只看披露行存在就无限等待，adTransitionDeadline 被遮蔽到全局 5 分钟超时。
+     */
+    private void retryAdSheet(List<TextBlock> boxes, int imageWidth, int imageHeight) {
+        if (adSheetRetries >= MAX_AD_SHEET_RETRIES) {
+            stop("广告页点击 " + (1 + MAX_AD_SHEET_RETRIES) + " 次仍未跳转，请手动检查该广告。");
+            return;
+        }
+        TextBlock retry = AdPromptMatcher.findDetails(boxes, imageWidth, imageHeight);
+        if (retry == null) {
+            stop("广告页停留超过 30 秒且未找到可点击入口，请手动检查该广告。");
+            return;
+        }
+        if (!allow(ActionGuard.Surface.AD_PROMPT, retry.text)) {
+            stop("广告入口「" + retry.text + "」被安全策略拒绝，已停止自动操作。");
+            return;
+        }
+        adSheetRetries++;
+        adTransitionDeadline = host.now() + 30000;
+        log("广告页停留超过 30 秒未跳转，正在重新点击「" + retry.text
+                + "」（第 " + adSheetRetries + " 次重试）。");
+        tap(retry.left, retry.top, retry.right, retry.bottom,
+                "已重新点击广告入口，继续等待。", "广告入口重试点击被中断。");
     }
 
     private void inspectAdPrompt(UiTree tree, List<TextBlock> boxes, int imageWidth, int imageHeight, long capturedAt) {
@@ -906,6 +1007,7 @@ public final class WelfareTaskRunner implements TaskRunner {
         Diag.i(TAG, "dispatch details");
         stage = 2;
         adSheetFrames = 0;
+        adSheetRetries = 0;
         adTransitionDeadline = host.now() + 30000;
         tap(target.left, target.top, target.right, target.bottom,
                 "已点击浏览入口，等待进入广告详情页。", "广告详情点击被中断。");
@@ -1049,39 +1151,67 @@ public final class WelfareTaskRunner implements TaskRunner {
                                           int imageWidth, int imageHeight) {
         if (!isAdDetailScreen(boxes)) {
             detailResidueFrames = 0;
+            nodeStallFrames = 0;
             return false;
         }
         if (tree != null && !tree.findExact("点击退出关闭视频").isEmpty()) {
-            // 广告视频页的常规收尾（点关闭+立即进入下一任务）走 inspectReward，不走这里。
+            // 常规视频广告：节点存在就交给 inspectReward 点它。
+            // 但图文详情页上该节点可能「存在却点不动」——真机 11-18 08:55 腾讯视频、
+            // 11-19 06:55/07:10 Apple 广告都是点完页面纹丝不动，随后干等 45s 超时。
+            // 连续 4 帧（约 8s）仍停在详情页就认定节点无效，改走返回键兜底。
+            if (++nodeStallFrames < NODE_STALL_FRAMES) {
+                detailResidueFrames = 0;
+                return false;
+            }
+            nodeStallFrames = 0;
+            log("广告详情页滞留且关闭节点点击无效，改用返回键退出。");
+        } else {
+            nodeStallFrames = 0;
+            if (++detailResidueFrames < 2) return true; // 双帧确认，避免把过渡帧当成残留页
             detailResidueFrames = 0;
-            return false;
         }
-        if (++detailResidueFrames < 2) return true; // 双帧确认，避免把过渡帧当成残留页
-        detailResidueFrames = 0;
-        if (detailResidueActions >= MAX_DETAIL_RESIDUE_ACTIONS) return true; // 点满不再动，等超时兜底
-        TextBlock close = null;
+        if (detailResidueActions >= MAX_DETAIL_RESIDUE_ACTIONS) return true; // 动作满额，等超时兜底
+        detailResidueActions++;
+        adTransitionDeadline = host.now() + 20000; // 退出详情页后还要走奖励确认，顺延本阶段时限
+        // 详情页常在 WebView 里，OCR 读到的 X 可能是广告创意的假按钮（真机点完无反应）；
+        // 返回键至少能在页面栈里退一层，优先用返回。返回不可用时再退回顶部 X。
+        if (host.env().back()) {
+            log("返回后仍停留在广告详情页，已按返回键退出，等待奖励提示。");
+            return true;
+        }
+        TextBlock close = findTopCornerClose(boxes, imageWidth, imageHeight);
+        if (close != null && allow(ActionGuard.Surface.DIALOG, "点击退出关闭视频")) {
+            tap(close.left, close.top, close.right, close.bottom,
+                    "返回后仍停留在广告详情页，已点击顶部角标关闭，等待奖励提示。",
+                    "关闭广告详情页被中断。");
+            return true;
+        }
+        stop("返回后停留在广告详情页且无法执行返回，请手动处理。");
+        return true;
+    }
+
+    private static TextBlock findTopCornerClose(List<TextBlock> boxes, int imageWidth, int imageHeight) {
         for (TextBlock box : boxes) {
             if (box == null || box.text == null) continue;
             String text = box.text.replace(" ", "");
             if (!"X".equals(text) && !"x".equals(text) && !"×".equals(text)) continue;
-            if (box.left < imageWidth * 3 / 4 || box.bottom > imageHeight / 4) continue; // 只认右上角
-            close = box;
-            break;
+            if (!isTopCornerClose(box.left, box.right, box.bottom, imageWidth, imageHeight)) {
+                continue; // 只认顶部角标（左上或右上）
+            }
+            return box;
         }
-        detailResidueActions++;
-        adTransitionDeadline = host.now() + 20000; // 退出详情页后还要走奖励确认，顺延本阶段时限
-        if (close != null && allow(ActionGuard.Surface.DIALOG, "点击退出关闭视频")) {
-            tap(close.left, close.top, close.right, close.bottom,
-                    "返回后仍停留在广告详情页，已点击右上角关闭，等待奖励提示。",
-                    "关闭广告详情页被中断。");
-            return true;
-        }
-        if (host.env().back()) {
-            log("返回后仍停留在广告详情页，已按返回键退出，等待奖励提示。");
-        } else {
-            stop("返回后停留在广告详情页且无法执行返回，请手动处理。");
-        }
-        return true;
+        return null;
+    }
+
+    /**
+     * 顶部角标关闭按钮：X 可能在右上角也可能在左上角（真机 2026-11-17 京东/欧态广告样式
+     * 的 X 在左上角，此前只认右上角导致「点击退出关闭视频」节点存在却永远过不了几何校验，
+     * stage 4 干等 30s 超时）。判定：落在屏幕顶部 1/4 行内，且靠左或靠右边缘。
+     */
+    private static boolean isTopCornerClose(int left, int right, int bottom,
+                                            int imageWidth, int imageHeight) {
+        if (bottom > imageHeight / 4) return false;
+        return left <= imageWidth / 4 || right >= imageWidth * 3 / 4;
     }
 
     /** 广告详情页特征：底部披露文案（OCR 会把「详情」误读成「详倩」，用公共后缀判定）或奖励角标。 */
@@ -1133,7 +1263,10 @@ public final class WelfareTaskRunner implements TaskRunner {
         if (close.size() != 1 || !close.get(0).isVisibleToUser()) return;
         Rect rect = new Rect();
         close.get(0).getBoundsInScreen(rect);
-        if (rect.isEmpty() || rect.left < imageWidth * 3 / 4 || rect.bottom > imageHeight / 4) return;
+        if (rect.isEmpty() || !isTopCornerClose(rect.left, rect.right, rect.bottom,
+                imageWidth, imageHeight)) {
+            return;
+        }
         String reason = carouselDone ? "广告轮播已完成，已关闭广告；" : "广告显示已获得奖励，已尝试关闭；";
         if (!allow(ActionGuard.Surface.DIALOG, "点击退出关闭视频")) return;
         nextTask(reason);
@@ -1206,6 +1339,13 @@ public final class WelfareTaskRunner implements TaskRunner {
     private void finish(String result) {
         if (finished) return;
         finished = true;
+        // 「奖励未能确认」不再堵死串联链：收尾前已尽量退出广告页，后续森林会自行回桌面再唤起
+        // 支付宝；否则一支关不掉的广告会让整条链停在森林之前（真机 11-19 06:56 实测）。
+        chainBlocked = result != null && (result.contains("请手动") || result.contains("请检查"))
+                && !result.contains("未能确认返回后的奖励");
+        // stage 4 收尾往往意味着广告页还盖在前台（真机 2026-11-17 06:42 第三支广告超时，
+        // 广告残页被丢给用户）。停止前 best-effort 关一次：能找到关闭节点就点，否则按返回。
+        if (stage == 4 && !signinTask) bestEffortCloseAd();
         if (adFlow != null) adFlow.cancel();
         Diag.i(TAG, "finish stage=" + stage + " task=" + currentTaskTitle
                 + " entries=" + entryBudget.entries(currentTaskTitle)
@@ -1215,6 +1355,37 @@ public final class WelfareTaskRunner implements TaskRunner {
                 + " fg=" + foregroundName() + " result=" + result);
         log(result);
         host.stopForeground();
+    }
+
+    /**
+     * 停止前兜底关闭广告残页：只在起点前台时执行（第三方页面按返回可能误伤用户操作）。
+     * 手势是异步的，失败不影响收尾流程——这只是尽力而为，不做重试。
+     */
+    private void bestEffortCloseAd() {
+        try {
+            if (!QIDIAN.equals(host.env().foreground())) return;
+            UiTree tree = host.trees().capture();
+            if (tree.root != null) {
+                List<AccessibilityNodeInfo> close = tree.findExact("点击退出关闭视频");
+                if (!close.isEmpty() && close.get(0).isVisibleToUser()) {
+                    Rect rect = new Rect();
+                    close.get(0).getBoundsInScreen(rect);
+                    if (!rect.isEmpty()) {
+                        host.gestures().tap(new Bounds(rect.left, rect.top, rect.right, rect.bottom),
+                                80, new Gestures.Callback() {
+                                    @Override public void onCompleted() { }
+                                    @Override public void onCancelled() { }
+                                    @Override public void onRejected() { }
+                                });
+                        log("停止前已尝试点击广告关闭按钮。");
+                        return;
+                    }
+                }
+            }
+            if (host.env().back()) log("停止前已按返回键尝试关闭广告页。");
+        } catch (RuntimeException ignored) {
+            // 兜底动作失败不影响收尾，日志里已有失败原因。
+        }
     }
 
     private void stop(String reason) {

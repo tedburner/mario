@@ -107,9 +107,19 @@ public final class RunCoordinator {
         active = null;
         generation.incrementAndGet();
         host.handler().removeCallbacks(loop);
-        TaskRunner next = pending.poll();
+        TaskRunner next = pending.peek();
+        if (next != null && !runner.chainShouldContinue()) {
+            // 软失败收尾（残页/弹窗在前台，需要人工确认）：丢弃剩余队列，不再自动叠加操作。
+            // 真机 2026-11-17 06:42 welfare「未能确认返回后的奖励」后 forest 照常启动，
+            // 广告页还盖在屏上——用户明确反馈「起点没完成就跑森林」。
+            Diag.i("MarioAdDiag", "run finish id=" + runner.id() + " next=blocked pending="
+                    + pending.size());
+            Diag.i("MarioAdDiag", "chain blocked by " + runner.id()
+                    + "（请手动处理类结果），剩余 " + pending.size() + " 个任务已停止自动执行。");
+            return;
+        }
         Diag.i("MarioAdDiag", "run finish id=" + runner.id() + " next="
                 + (next == null ? "none" : next.id()));
-        if (next != null) activate(next);
+        if (next != null) activate(pending.poll());
     }
 }

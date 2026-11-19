@@ -116,7 +116,9 @@ public final class ForestTaskParser {
     }
 
     private static boolean isHeaderTitle(String title) {
-        for (String header : HEADER_TITLES) if (title.contains(header)) return true;
+        // 必须用 startsWith：任务行「去森林寻宝抽1t能量」包含「森林寻宝」，
+        // 之前的 contains 把它当头部横幅整行排除，真机 2026-11-19 确认该任务从未进入候选。
+        for (String header : HEADER_TITLES) if (title.startsWith(header)) return true;
         return false;
     }
 

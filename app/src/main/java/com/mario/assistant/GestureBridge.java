@@ -20,7 +20,7 @@ import android.os.Process;
  *   --es type tap --ei x 600 --ei y 1200
  *   --es type swipe --ei x1 600 --ei y1 1800 --ei x2 600 --ei y2 900 --ei dur 350
  *   --es type back
- *   --es type arm | recover | collect
+ *   --es type arm | recover | collect | treasure
  */
 public final class GestureBridge extends BroadcastReceiver {
     private static final String TAG = "MarioGesture";
@@ -87,6 +87,11 @@ public final class GestureBridge extends BroadcastReceiver {
             if ("collect".equals(type)) {
                 boolean ok = service.debugForestCollect();
                 Diag.i(TAG, "collect ok=" + ok);
+                return;
+            }
+            if ("treasure".equals(type)) {
+                boolean ok = service.debugForestTreasure();
+                Diag.i(TAG, "treasure ok=" + ok);
                 return;
             }
             if ("back".equals(type)) {

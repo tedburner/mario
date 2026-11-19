@@ -146,6 +146,12 @@ public final class TaskService extends AccessibilityService implements RunHost {
         scanHandler.post(() -> coordinator.start(new ForestTaskRunner(ForestTaskRunner.Mode.DEBUG_COLLECT)));
         return true;
     }
+    /** 仅调试桥使用：停在森林寻宝页时直接验证签到/逛逛/抽奖子流程。 */
+    boolean debugForestTreasure() {
+        if (scanHandler == null || coordinator == null) return false;
+        scanHandler.post(() -> coordinator.start(new ForestTaskRunner(ForestTaskRunner.Mode.DEBUG_TREASURE)));
+        return true;
+    }
     @Override public long now() { return SystemClock.elapsedRealtime(); }
     @Override public Handler handler() { return scanHandler; }
     @Override public DeviceEnvironment env() { return env; }

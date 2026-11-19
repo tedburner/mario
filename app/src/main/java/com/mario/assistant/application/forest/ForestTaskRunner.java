@@ -17,10 +17,12 @@ import com.mario.assistant.infrastructure.a11y.UiTree;
 import com.mario.assistant.infrastructure.system.DeviceEnvironment;
 import com.mario.assistant.infrastructure.ui.Diag;
 import java.util.List;
+import java.util.regex.Matcher;
+import java.util.regex.Pattern;
 
 /** 蚂蚁森林奖励页任务：动态解析任务行，逐个浏览/领取并自动回到奖励页。 */
 public final class ForestTaskRunner implements TaskRunner {
-    public enum Mode { NORMAL, DEBUG_RECOVER, DEBUG_COLLECT }
+    public enum Mode { NORMAL, DEBUG_RECOVER, DEBUG_COLLECT, DEBUG_TREASURE }
 
     private static final String ALIPAY = DeviceEnvironment.ALIPAY;
     private static final long BROWSE_GRACE_MS = 2000;
@@ -38,9 +40,13 @@ public final class ForestTaskRunner implements TaskRunner {
     private RunToken token;
     private ActionGate gate;
     private boolean finished;
+    /** 以「请手动」类结果收尾：协调器据此不再接续串联队列中的下一棒。 */
+    private boolean chainBlocked;
 
     private static final String TAG = "MarioAdDiag";
-    private int stage; // 0=找任务, 1=点击后观察, 2=等待返回奖励页, 3=抽奖页识别, 4=第三方滞留后恢复
+    /** 落地页 OCR 里的浏览时长要求：「浏览5秒」「浏览30s」。 */
+    private static final Pattern BROWSE_SECONDS_OCR = Pattern.compile("浏览(\\d+)(?:秒|s)");
+    private int stage; // 0=找任务, 1=点击后观察, 2=等待返回奖励页, 3=抽奖页识别, 4=第三方滞留后恢复, 5=寻宝内页
     private long deadline;
     /** 本 run 启动时刻：finish 行带 run=Ns，复盘不用再手推时间戳。 */
     private long startedAtMs;
@@ -52,6 +58,8 @@ public final class ForestTaskRunner implements TaskRunner {
     private boolean usedGesture;
     private boolean energyProbed;
     private boolean energyCollected;
+    /** 本任务已用 OCR 读过落地页的「浏览Ns」要求：一次运行只读一次。 */
+    private boolean browseProbed;
     private boolean returnBacked;
     private boolean claimMode;
     private int returnBacks;
@@ -72,6 +80,52 @@ public final class ForestTaskRunner implements TaskRunner {
     private long milestoneAt;
     private boolean drawMode;
     private int offRewardScans;
+    /** 连续不在支付宝前台的扫描次数：淘宝等任务把前台抢走后不能干等到 20min 总超时。 */
+    private int offAlipayScans;
+    /** 森林寻宝内页是 H5 画布，按钮只有文本节点，进页后统一按文本坐标轻点。 */
+    private boolean treasureMode;
+    private boolean treasureBrowsing;
+    private long treasureBusyUntil;
+    private long treasureBrowseEndAt;
+    private long treasureBrowseSwipeAt;
+    private int treasureBrowseSwipes;
+    private int treasureSignIns;
+    private int treasureClaimTaps;
+    private int treasureBrowseTaps;
+    private int treasureDrawTaps;
+    private int treasureOcrTries;
+    private long treasureOcrAt;
+    /** 浏览页的「已完成 可领奖励」角标点过一次就不再点。 */
+    private boolean treasureBrowseClaim;
+    private int treasureTopSwipes;
+    private long treasureTopSwipeAt;
+    private long treasureScanAt;
+    /** 抽奖后等动画结束再 OCR 找结果弹窗的关闭按钮。 */
+    private long treasureVerifyAt;
+    private static final int OCR_ENTRY = 0;
+    private static final int OCR_DRAW = 1;
+    private static final int OCR_DISMISS = 2;
+    private static final int OCR_BROWSE_CLAIM = 3;
+    private static final int OCR_BROWSE_SCAN = 4;
+    private int treasureCloseTaps;
+    private int treasureBackTaps;
+    /** 「还有N次机会」有时读不到，签到/领取成功就记一笔待抽，保证机会不会被漏掉。 */
+    private int treasureDrawPending;
+    private int treasureDismissTries;
+    /** H5 抓树会瞬时空窗，连续 3 个 tick 认不出寻宝页才允许按返回。 */
+    private int treasureUnseenTicks;
+    /** 浏览行偶尔从树里消失，多等几个 tick 让树刷新再决定收尾。 */
+    private int treasureIdleTicks;
+    private boolean treasureDiagOnce;
+    private static final int MAX_TREASURE_CLAIMS = 4;
+    private static final int MAX_TREASURE_BROWSES = 4;
+    private static final int MAX_TREASURE_DRAWS = 6;
+    private static final int MAX_TREASURE_CLOSES = 4;
+    /** WebView 抓树偶发卡死 20~35 秒，浏览页要留够解冻后继续滑动的时间。 */
+    private static final long TREASURE_BROWSE_WAIT_MS = 90000;
+    private static final long TREASURE_DEADLINE_MS = 7 * 60 * 1000;
+    private static final Pattern TREASURE_CHANCES = Pattern.compile("还有\\s*(\\d+)\\s*次机会");
+    private static final Pattern BLANKS = Pattern.compile("[\\s\\u00a0\\u2000-\\u200a\\u3000]");
     private String lastSignature;
     private String priorKey;
     private boolean lastClickWasClaim;
@@ -115,7 +169,15 @@ public final class ForestTaskRunner implements TaskRunner {
             probeEnergyPage();
             return;
         }
-        deadline = now + 15 * 60 * 1000;
+        if (mode == Mode.DEBUG_TREASURE) {
+            taskTitle = "(调试寻宝)";
+            deadline = now + 5 * 60 * 1000;
+            enterTreasure(now);
+            return;
+        }
+        deadline = now + 20 * 60 * 1000;
+        // 15min 版实测三天全部撞满（11-14/11-15/11-17 完成 16-22 项即超时），底部任务
+        // 全部漏掉；等待时长自适应压缩后 20min 作为兜底上限。
         // 串联运行时前台可能还在起点：自行唤起支付宝，后续由恢复路径进森林奖励页。
         if (!ALIPAY.equals(host.env().foreground())) {
             if (!host.env().launch(ALIPAY, false)) {
@@ -140,6 +202,7 @@ public final class ForestTaskRunner implements TaskRunner {
             else if (stage == 2) waitReturn(now);
             else if (stage == 3) waitClaimPage(now);
             else if (stage == 4) waitRecover(now);
+            else if (stage == 5) runTreasure(now);
         } catch (RuntimeException e) {
             log("forest error " + e);
             stop("森林任务异常停止：" + e.getMessage());
@@ -155,9 +218,18 @@ public final class ForestTaskRunner implements TaskRunner {
         UiTree tree = host.trees().capture();
         if (tree.root == null) { log("森林：等待支付宝页面。"); return; }
         if (!ALIPAY.equals(tree.packageName)) {
-            log("森林：等待支付宝前台（当前 " + (tree.packageName.isEmpty() ? "未知" : tree.packageName) + "）。");
+            String pkg = tree.packageName.isEmpty() ? "未知" : tree.packageName;
+            if (++offAlipayScans >= 4) {
+                // 真机 11-18 09:35 淘宝任务把前台抢走后这里只打日志，空转 5 分钟直到 20min 总超时。
+                offAlipayScans = 0;
+                beginRecover(now);
+                log("森林：连续不在支付宝前台（当前 " + pkg + "），正在尝试回到奖励页。");
+            } else {
+                log("森林：等待支付宝前台（当前 " + pkg + "）。");
+            }
             return;
         }
+        offAlipayScans = 0;
         if (!isRewardPage(tree)) {
             // 停在森林主页/内页时不能一直刷「请停留」直到超时，主动去点「领奖」重开弹窗
             if (++offRewardScans >= 5) {
@@ -218,6 +290,7 @@ public final class ForestTaskRunner implements TaskRunner {
             taskTitle = null;
             claimMode = false;
             lastClickWasClaim = false;
+            treasureMode = false;
         }
         if (attempts >= MAX_ATTEMPTS) {
             stop("森林：已点击 " + attempts + " 次，达到 " + MAX_ATTEMPTS + " 次安全网上限；"
@@ -276,6 +349,7 @@ public final class ForestTaskRunner implements TaskRunner {
         observeThirdParty = next.observeThirdParty;
         claimMode = next.kind == ForestTask.Kind.CLAIM;
         drawMode = next.kind == ForestTask.Kind.DRAW;
+        treasureMode = next.kind == ForestTask.Kind.BROWSE && next.title.contains("寻宝");
         lastClickWasClaim = claimMode;
         browseSeconds = next.browseSeconds();
         tapLeft = next.left;
@@ -285,6 +359,7 @@ public final class ForestTaskRunner implements TaskRunner {
         usedGesture = false;
         energyProbed = false;
         energyCollected = false;
+        browseProbed = false;
         stage = 1;
         stageAt = now;
         priorKey = null;
@@ -373,6 +448,12 @@ public final class ForestTaskRunner implements TaskRunner {
             log("森林：「" + taskTitle + "」落在应用商店/下载页，已返回并跳过。");
             return;
         }
+        if (treasureMode && ALIPAY.equals(pkg) && !rewardPage) {
+            if (elapsed < 2500) return;
+            treasureMode = false;
+            enterTreasure(now);
+            return;
+        }
         if (ALIPAY.equals(pkg)) {
             if (elapsed < 4000) return;
             if (rewardPage) {
@@ -400,6 +481,7 @@ public final class ForestTaskRunner implements TaskRunner {
                 }
                 return;
             }
+            if (!browseProbed && elapsed > 2500) probeBrowseSeconds();
             if (!energyProbed && elapsed > 2500) probeEnergyPage();
             return;
         }
@@ -411,7 +493,39 @@ public final class ForestTaskRunner implements TaskRunner {
                 beginRecover(now);
                 log("森林：无法从「" + pkg + "」返回，正在重新打开支付宝。");
             }
+            return;
         }
+        if (!browseProbed && elapsed > 2500) probeBrowseSeconds();
+    }
+
+    /**
+     * 落地页 OCR 读「浏览Ns」要求，动态调整停留时长。
+     * 任务行内没有时长文案（22/22 全走默认值，真机 2026-11-17），「浏览5秒」「浏览30s」
+     * 只出现在落地页上：5 秒的任务不必陪等 15 秒，30 秒的提前知道可以避免返回后
+     * 「浏览后仍可点击」再点一次的双倍开销。
+     */
+    private void probeBrowseSeconds() {
+        if (host.ocr().busy()) return;
+        browseProbed = true;
+        host.ocr().recognize(boxes -> {
+            if (!token.isCurrent() || stage != 1 || boxes == null) return;
+            for (TextBlock box : boxes) {
+                if (box == null || box.text == null) continue;
+                Matcher matcher = BROWSE_SECONDS_OCR.matcher(box.text.replace(" ", ""));
+                if (!matcher.find()) continue;
+                try {
+                    int seconds = Math.max(5, Math.min(60, Integer.parseInt(matcher.group(1))));
+                    if (seconds != browseSeconds) {
+                        browseSeconds = seconds;
+                        log("森林：「" + taskTitle + "」落地页要求浏览 " + seconds
+                                + " 秒，已调整停留时长。");
+                    }
+                } catch (NumberFormatException ignored) {
+                    // OCR 数字识别异常时保持默认时长。
+                }
+                return;
+            }
+        }, null);
     }
 
     /** 「找能量」好友页：只点「一键收」，浇水/道具/留言等会消耗资源的按钮一律不碰。 */
@@ -524,8 +638,14 @@ public final class ForestTaskRunner implements TaskRunner {
                 log("森林：等待支付宝回到前台。");
             } else if (elapsed > 8000 + recoverRelaunch * 8000L && recoverRelaunch < 3) {
                 recoverRelaunch++;
-                if (host.env().launch(ALIPAY, false)) {
-                    log("森林：支付宝未到前台，正在再次唤起（第 " + recoverRelaunch + " 次）。");
+                // 真机 11-19 09:10：普通唤起恢复的是支付宝小程序容器，0.9 秒后又跳回淘宝；
+                // 第二次起改为回桌面后清栈重启，直接落到支付宝首页再点「蚂蚁森林」。
+                boolean fresh = recoverRelaunch >= 2;
+                if (fresh) host.env().home();
+                if (host.env().launch(ALIPAY, fresh)) {
+                    log(fresh
+                            ? "森林：支付宝被小程序反复带回第三方，正在重启支付宝（第 " + recoverRelaunch + " 次）。"
+                            : "森林：支付宝未到前台，正在再次唤起（第 " + recoverRelaunch + " 次）。");
                 } else {
                     stop("森林：无法重新打开支付宝，请手动进入奖励页。");
                 }
@@ -756,6 +876,505 @@ public final class ForestTaskRunner implements TaskRunner {
                 && host.uiActions().clickNodeOrParent(close);
     }
 
+    private void enterTreasure(long now) {
+        stage = 5;
+        stageAt = now;
+        treasureBusyUntil = 0;
+        treasureBrowsing = false;
+        treasureSignIns = 0;
+        treasureClaimTaps = 0;
+        treasureBrowseTaps = 0;
+        treasureDrawTaps = 0;
+        treasureOcrTries = 0;
+        treasureOcrAt = 0;
+        treasureVerifyAt = 0;
+        treasureCloseTaps = 0;
+        treasureBackTaps = 0;
+        treasureDrawPending = 0;
+        treasureDismissTries = 0;
+        treasureUnseenTicks = 0;
+        treasureIdleTicks = 0;
+        treasureDiagOnce = true;
+        treasureBrowseClaim = false;
+        log("森林：已进入森林寻宝页，开始处理签到、逛逛与抽奖。");
+        requestTreasureOcr(OCR_ENTRY, now);
+    }
+
+    /**
+     * 寻宝内页是 H5 画布：按钮只有文本节点，全部按坐标轻点。
+     * 页面状态只认文本（「还有N次机会」「领取」「去逛逛」「【限时】」），
+     * 每个动作都有次数上限，超时或做完就回奖励页，不阻塞主任务列表。
+     */
+    private void runTreasure(long now) {
+        if (now < treasureBusyUntil) return;
+        if (host.ocr().busy()) return;
+        if (now - stageAt > TREASURE_DEADLINE_MS) {
+            finishTreasure(now, "森林：寻宝内页处理超时，正在返回奖励页。");
+            return;
+        }
+        String pkg = host.env().foreground();
+        if (!ALIPAY.equals(pkg)) {
+            if (treasureBrowsing) {
+                closeTreasureMiniApp(now);
+            } else {
+                beginRecover(now);
+                log("森林：寻宝页切到「" + pkg + "」，正在恢复奖励页。");
+            }
+            return;
+        }
+        UiTree tree = host.trees().capture();
+        if (tree.root == null) return;
+        if (!isTreasurePage(tree)) {
+            if (isRewardPage(tree)) {
+                stage = 0;
+                stageAt = now;
+                priorKey = null;
+                log("森林：寻宝任务已处理完，已回到奖励页。");
+                return;
+            }
+            if (treasureBrowsing && now < treasureBrowseEndAt) {
+                swipeTreasureBrowse(now, tree);
+                return;
+            }
+            if (treasureBrowsing && !treasureBrowseClaim && treasureOcrTries < 3) {
+                // 角标是页面顶部的横幅，滑出去就 OCR 不到：先滑回顶部再截
+                if (treasureTopSwipes < 4) {
+                    if (now >= treasureTopSwipeAt) {
+                        treasureTopSwipes++;
+                        treasureTopSwipeAt = now + 1200;
+                        if (treasureTopSwipes == 1) {
+                            log("森林：浏览完成，正在滑回市集顶部找领取入口。");
+                        }
+                        swipe(false);
+                        return;
+                    }
+                    treasureBusyUntil = now + 800;
+                    return;
+                }
+                if (now - treasureOcrAt > 3000) {
+                    treasureOcrTries++;
+                    requestTreasureOcr(OCR_BROWSE_CLAIM, now);
+                } else {
+                    treasureBusyUntil = now + 800;
+                }
+                return;
+            }
+            if (treasureBrowsing || treasureBrowseTaps > 0) {
+                closeTreasureMiniApp(now);
+                return;
+            }
+            if (treasureUnseenTicks < 3) {
+                treasureUnseenTicks++;
+                treasureBusyUntil = now + 1200;
+                return;
+            }
+            if (treasureBackTaps < 2) {
+                treasureBackTaps++;
+                host.env().back();
+                treasureBusyUntil = now + 1500;
+                log("森林：寻宝页未识别，正在返回（第 " + treasureBackTaps + " 次）。");
+            } else {
+                beginRecover(now);
+                log("森林：寻宝页无法识别，正在恢复奖励页。");
+            }
+            return;
+        }
+        treasureBrowsing = false;
+        treasureBackTaps = 0;
+        treasureUnseenTicks = 0;
+
+        if (treasureVerifyAt > 0) {
+            if (now < treasureVerifyAt) return;
+            treasureVerifyAt = 0;
+            treasureOcrTries = 0;
+            if (host.ocr().busy()) {
+                treasureBusyUntil = now + 800;
+                treasureVerifyAt = now + 800;
+                return;
+            }
+            requestTreasureOcr(OCR_DISMISS, now);
+            return;
+        }
+
+        // 抽奖结果弹窗右上角的 X 点不动，实测「做任务继续抽」可以关闭
+        UiNode popup = findTreasureNode(tree, "做任务继续抽");
+        if (popup == null) popup = findTreasureNode(tree, "收下奖励");
+        if (popup == null) popup = findTreasureNode(tree, "知道了");
+        if (popup != null && allow(ActionGuard.Surface.DIALOG, popup.text)) {
+            treasureVerifyAt = 0;
+            treasureOcrTries = 0;
+            tapForest(popup.left, popup.top, popup.right, popup.bottom);
+            treasureBusyUntil = now + 1600;
+            log("森林：已关闭寻宝抽奖结果弹窗。");
+            return;
+        }
+
+        if (treasureSignIns == 0) {
+            treasureSignIns = 1; // 已签到时按钮会消失，每次进页只找一次
+            UiNode signIn = findTreasureNode(tree, "签到");
+            if (signIn != null && allow(ActionGuard.Surface.TASK_ROW, "签到")) {
+                treasureDrawPending++;
+                tapForest(signIn.left, signIn.top, signIn.right, signIn.bottom);
+                treasureBusyUntil = now + 1800;
+                log("森林：寻宝页已点击「签到」领取抽奖机会。");
+                return;
+            }
+        }
+
+        UiNode claim = findTreasureNode(tree, "领取");
+        if (claim != null && treasureClaimTaps < MAX_TREASURE_CLAIMS
+                && allow(ActionGuard.Surface.TASK_ROW, "领取")) {
+            treasureClaimTaps++;
+            treasureDrawPending++;
+            tapForest(claim.left, claim.top, claim.right, claim.bottom);
+            treasureBusyUntil = now + 1800;
+            log("森林：寻宝页已点击「领取」抽奖机会。");
+            return;
+        }
+
+        int chances = treasureChances(tree);
+        if (chances > 0) treasureDrawPending = Math.max(treasureDrawPending, chances);
+        UiNode draw = findTreasureNode(tree, "立即抽奖");
+        if (draw == null && treasureDiagOnce && (chances > 0 || treasureDrawPending > 0)) {
+            treasureDiagOnce = false;
+            log("森林：树里未见抽奖按钮，页面「机会」文本=" + chanceTexts(tree));
+        }
+        boolean wantDraw = chances > 0 || treasureDrawPending > 0;
+        if (wantDraw && treasureDrawTaps < MAX_TREASURE_DRAWS) {
+            if (draw != null && allow(ActionGuard.Surface.DIALOG, "立即抽奖")) {
+                treasureDrawTaps++;
+                        treasureOcrTries = 0;
+                treasureDismissTries = 0;
+                treasureIdleTicks = 0;
+                if (treasureDrawPending > 0) treasureDrawPending--;
+                tapForest(draw.left, draw.top, draw.right, draw.bottom);
+                treasureBusyUntil = now + 3200;
+                treasureVerifyAt = now + 3600;
+                log("森林：寻宝剩余机会 " + Math.max(chances, 1) + "，正在抽奖（第 " + treasureDrawTaps + " 次）。");
+                return;
+            }
+            // 「立即抽奖」是画布元素，树里经常没有：改用 OCR 截图定位
+            if (treasureOcrTries >= 3) {
+                treasureDrawPending = 0; // OCR 也找不到就这轮放弃，先去逛逛
+            } else if (now - treasureOcrAt < 4000) {
+                treasureBusyUntil = now + 1000; // 等 OCR 冷却，别把机会丢了
+                return;
+            } else {
+                treasureOcrTries++;
+                requestTreasureOcr(OCR_DRAW, now);
+                return;
+            }
+        }
+
+        if (treasureBrowseTaps < MAX_TREASURE_BROWSES) {
+            UiNode browse = findTreasureBrowse(tree);
+            if (browse != null && allow(ActionGuard.Surface.TASK_ROW, browse.text)) {
+                treasureBrowseTaps++;
+                treasureIdleTicks = 0;
+                treasureBrowsing = true;
+                treasureBrowseEndAt = now + TREASURE_BROWSE_WAIT_MS;
+                treasureBrowseSwipes = 0;
+                treasureBrowseSwipeAt = now + 2500;
+                treasureBrowseClaim = false;
+                treasureOcrTries = 0;
+                treasureTopSwipes = 0;
+                treasureTopSwipeAt = 0;
+                treasureScanAt = now + 5000;
+                tapForest(browse.left, browse.top, browse.right, browse.bottom);
+                treasureBusyUntil = now + 3000;
+                log("森林：寻宝页已点击「" + browse.text + "」，停留 "
+                        + TREASURE_BROWSE_WAIT_MS / 1000 + " 秒后返回。");
+                return;
+            }
+            if (treasureIdleTicks < 5) {
+                treasureIdleTicks++;
+                treasureBusyUntil = now + 1200;
+                if (treasureIdleTicks == 1) {
+                    log("森林：寻宝页暂未发现可浏览任务，等待列表刷新。");
+                }
+                return;
+            }
+        }
+
+        finishTreasure(now, "森林：寻宝页内可做任务已完成，正在返回奖励页。");
+    }
+
+    /** 寻宝内的小游戏吞返回键：先找「关闭」节点，再按真机坐标 (0.875w, 0.075h) 兜底，最后才返回。 */
+    private void closeTreasureMiniApp(long now) {
+        if (treasureCloseTaps >= MAX_TREASURE_CLOSES) {
+            treasureBrowsing = false;
+            beginRecover(now);
+            log("森林：寻宝内的小游戏退不出去，正在恢复奖励页。");
+            return;
+        }
+        treasureCloseTaps++;
+        UiTree tree = host.trees().capture();
+        AccessibilityNodeInfo close = tree.findCloseButton();
+        if (close != null && allow(ActionGuard.Surface.DIALOG, "关闭")
+                && host.uiActions().clickNodeOrParent(close)) {
+            treasureBusyUntil = now + 2000;
+            log("森林：已点击寻宝内页右上角「关闭」。");
+            return;
+        }
+        if (treasureCloseTaps % 2 == 1 && allow(ActionGuard.Surface.NAVIGATION, "关闭小游戏")) {
+            int cx = host.env().screenWidth() * 7 / 8;
+            int cy = host.env().screenHeight() * 15 / 200;
+            host.gestures().tap(new Bounds(cx - 30, cy - 30, cx + 30, cy + 30), 80, NO_OP);
+            treasureBusyUntil = now + 2000;
+            log("森林：已按坐标点击小游戏右上角关闭。");
+            return;
+        }
+        host.env().back();
+        treasureBusyUntil = now + 1500;
+        log("森林：正在退出寻宝内的小游戏（返回）。");
+    }
+
+    private void finishTreasure(long now, String reason) {
+        host.env().back();
+        beginReturn(now);
+        log(reason);
+    }
+
+    /**
+     * 市集页写着「滑动浏览得抽奖机会」：只停留不划动不计入，真机实测约 6~7 次滑动后
+     * 右上角变「已完成 可领奖励」；滑到一半还会弹「猜价格」小游戏挡住后续滑动，直接放弃。
+     * WebView 抓树偶尔卡顿导致划不动，所以按 60 秒兜底、看到「已完成」就提前返回。
+     */
+    private void swipeTreasureBrowse(long now, UiTree tree) {
+        if (now < treasureBrowseSwipeAt) return;
+        if (now >= treasureScanAt && now < treasureBrowseEndAt - 8000) {
+            treasureScanAt = now + 6000;
+            requestTreasureOcr(OCR_BROWSE_SCAN, now);
+            return;
+        }
+        UiNode badge = findTreasureNodeContains(tree, "可领奖励");
+        if (badge != null && !treasureBrowseClaim && allow(ActionGuard.Surface.TASK_ROW, "可领奖励")) {
+            treasureBrowseClaim = true;
+            tapForest(badge.left, badge.top, badge.right, badge.bottom);
+            treasureBusyUntil = now + 2500;
+            log("森林：市集浏览已完成，已点击「可领奖励」。");
+            return;
+        }
+        if (treasureBrowseDone(tree)) {
+            treasureBrowseEndAt = now;
+            log("森林：市集浏览已完成，准备领取奖励。");
+            return;
+        }
+        if (now > treasureBrowseEndAt - 6000) return;
+        UiNode skip = findTreasureNode(tree, "放弃奖励");
+        if (skip != null && allow(ActionGuard.Surface.TASK_ROW, "放弃奖励")) {
+            treasureBrowseSwipeAt = now + 2500;
+            tapForest(skip.left, skip.top, skip.right, skip.bottom);
+            treasureBusyUntil = now + 2200;
+            log("森林：已放弃市集「猜价格」小游戏，继续滑动浏览。");
+            return;
+        }
+        if (treasureBrowseSwipes >= 14) return;
+        treasureBrowseSwipes++;
+        treasureBrowseSwipeAt = now + 3000;
+        swipe(true);
+        log("森林：正在滑动浏览寻宝内页（第 " + treasureBrowseSwipes + " 次）。");
+    }
+
+    private static boolean treasureBrowseDone(UiTree tree) {
+        for (UiNode node : tree.nodes) {
+            if (node != null && node.visible && node.text != null && node.text.contains("已完成")) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    private static boolean isTreasurePage(UiTree tree) {
+        // 抽奖结果弹窗会盖住整页，树里只剩弹窗按钮：不认出来就会误按返回
+        if (tree.hasText("立即抽奖") || tree.hasText("返回森林") || tree.hasText("森林寻宝")
+                || tree.hasText("去抽奖") || tree.hasText("做任务继续抽")
+                || tree.hasText("收下奖励") || tree.hasText("去兑换")) return true;
+        for (UiNode node : tree.nodes) {
+            if (node == null || !node.visible || node.text == null) continue;
+            if (node.text.contains("次机会") || node.text.contains("去森林市集逛一逛")
+                    || node.text.contains("玩一玩找不停")) return true;
+        }
+        return false;
+    }
+
+    private static UiNode findTreasureNode(UiTree tree, String text) {
+        for (UiNode node : tree.nodes) {
+            if (node != null && node.visible && node.hasBounds() && node.inViewport()
+                    && text.equals(node.text)) return node;
+        }
+        return null;
+    }
+
+    /** 角标类文案会拼接（「已完成 可领奖励」），按包含匹配并限制在按钮尺寸内。 */
+    private static UiNode findTreasureNodeContains(UiTree tree, String text) {
+        for (UiNode node : tree.nodes) {
+            if (node == null || !node.visible || !node.hasBounds() || !node.inViewport()) continue;
+            if (node.text == null || !node.text.contains(text)) continue;
+            if (node.bottom - node.top > tree.height * 15 / 100) continue;
+            return node;
+        }
+        return null;
+    }
+
+    /** 只逛非【限时】的浏览行：限时行要升建筑/打怪，超出自动浏览的能力边界。 */
+    private static UiNode findTreasureBrowse(UiTree tree) {
+        int limitedTop = Integer.MAX_VALUE;
+        for (UiNode node : tree.nodes) {
+            if (node == null || !node.visible || node.text == null) continue;
+            if (node.text.contains("【限时】")) limitedTop = Math.min(limitedTop, node.top);
+        }
+        UiNode fallback = null;
+        for (UiNode node : tree.nodes) {
+            if (node == null || !node.visible || !node.hasBounds() || !node.inViewport()) continue;
+            if (node.top >= limitedTop) continue;
+            if ("去逛逛".equals(node.text)) return node;
+            if ("马上玩".equals(node.text) && fallback == null) fallback = node;
+        }
+        return fallback;
+    }
+
+    private static int treasureChances(UiTree tree) {
+        int chances = 0;
+        for (UiNode node : tree.nodes) {
+            if (node == null || !node.visible || node.text == null) continue;
+            Matcher matcher = TREASURE_CHANCES.matcher(BLANKS.matcher(node.text).replaceAll(""));
+            if (!matcher.find()) continue;
+            try {
+                chances = Math.max(chances, Integer.parseInt(matcher.group(1)));
+            } catch (NumberFormatException ignored) {
+                // 识别异常按 0 次处理，不抽奖。
+            }
+        }
+        return chances;
+    }
+
+    private static String chanceTexts(UiTree tree) {
+        StringBuilder sb = new StringBuilder();
+        for (UiNode node : tree.nodes) {
+            if (node == null || !node.visible || node.text == null || !node.text.contains("机会")) continue;
+            if (sb.length() > 0) sb.append('|');
+            sb.append(node.text);
+            if (sb.length() > 160) break;
+        }
+        return sb.length() == 0 ? "无" : sb.toString();
+    }
+
+    /** 寻宝页主区是画布：机会计数、立即抽奖、抽奖结果弹窗在树里时有时无，统一 OCR 兜底。 */
+    private void requestTreasureOcr(int purpose, long now) {
+        if (host.ocr().busy()) return;
+        treasureOcrAt = now;
+        host.ocr().recognize(boxes -> {
+            if (finished || !token.isCurrent() || stage != 5) return;
+            onTreasureOcr(purpose, boxes);
+        }, code -> { });
+    }
+
+    private void onTreasureOcr(int purpose, List<TextBlock> boxes) {
+        if (boxes == null) return;
+        long now = host.now();
+        int chances = ocrChances(boxes);
+        if (chances > 0) {
+            treasureDrawPending = Math.max(treasureDrawPending, Math.min(chances, MAX_TREASURE_DRAWS));
+            if (purpose == OCR_ENTRY) {
+                log("森林：寻宝页 OCR 读到剩余 " + chances + " 次抽奖机会。");
+            }
+        }
+        if (purpose == OCR_DRAW) {
+            TextBlock draw = findOcrBlock(boxes, "立即抽奖");
+            if (draw == null || treasureDrawTaps >= MAX_TREASURE_DRAWS
+                    || !allow(ActionGuard.Surface.DIALOG, "立即抽奖")) return;
+            // 0 次时按钮仍在页面上，只有同一张图读到「还有N次机会」才点
+            if (chances == 0) return;
+            treasureDrawTaps++;
+            treasureDismissTries = 0;
+            if (treasureDrawPending > 0) treasureDrawPending--;
+            host.gestures().tap(new Bounds(draw.left, draw.top, draw.right, draw.bottom), 80, NO_OP);
+            treasureBusyUntil = now + 3200;
+            treasureVerifyAt = now + 3600;
+            log("森林：OCR 已点击「立即抽奖」（第 " + treasureDrawTaps + " 次）。");
+            return;
+        }
+        if (purpose == OCR_BROWSE_SCAN) {
+            // 猜价格小游戏会盖住市集页且划不动，只能靠截图认字关掉
+            TextBlock skip = findOcrBlock(boxes, "放弃奖励");
+            if (skip != null && allow(ActionGuard.Surface.TASK_ROW, "放弃奖励")) {
+                host.gestures().tap(new Bounds(skip.left, skip.top, skip.right, skip.bottom), 80, NO_OP);
+                treasureBusyUntil = now + 2000;
+                log("森林：已放弃市集「猜价格」小游戏（OCR）。");
+                return;
+            }
+            TextBlock claim = findOcrBlock(boxes, "可领奖励");
+            if (claim != null && !treasureBrowseClaim
+                    && allow(ActionGuard.Surface.TASK_ROW, "可领奖励")) {
+                treasureBrowseClaim = true;
+                host.gestures().tap(new Bounds(claim.left, claim.top, claim.right, claim.bottom), 80, NO_OP);
+                treasureBusyUntil = now + 2500;
+                log("森林：市集浏览已完成，已点击「可领奖励」（OCR）。");
+                return;
+            }
+            if (findOcrBlock(boxes, "猜价格") != null && allow(ActionGuard.Surface.NAVIGATION, "关闭小游戏")) {
+                int cx = host.env().screenWidth() * 867 / 1000;
+                int cy = host.env().screenHeight() * 254 / 1000;
+                host.gestures().tap(new Bounds(cx - 40, cy - 40, cx + 40, cy + 40), 80, NO_OP);
+                treasureBusyUntil = now + 2000;
+                log("森林：已按坐标关闭市集「猜价格」小游戏。");
+            }
+            return;
+        }
+        if (purpose == OCR_BROWSE_CLAIM) {
+            treasureBrowseClaim = true;
+            TextBlock claim = findOcrBlock(boxes, "可领奖励");
+            if (claim != null && allow(ActionGuard.Surface.TASK_ROW, "可领奖励")) {
+                host.gestures().tap(new Bounds(claim.left, claim.top, claim.right, claim.bottom), 80, NO_OP);
+                treasureBusyUntil = now + 2500;
+                log("森林：市集浏览已完成，已点击「可领奖励」（OCR）。");
+            } else {
+                log("森林：市集页未见「可领奖励」，直接返回。");
+            }
+            return;
+        }
+        if (purpose == OCR_DISMISS) {
+            TextBlock btn = findOcrBlock(boxes, "做任务继续抽");
+            if (btn == null) btn = findOcrBlock(boxes, "收下奖励");
+            if (btn == null) btn = findOcrBlock(boxes, "知道了");
+            if (btn == null) {
+                if (treasureDismissTries < 2) {
+                    treasureDismissTries++;
+                    treasureVerifyAt = now + 1600; // 弹窗可能还在动画，稍后再截一次
+                }
+                return;
+            }
+            if (!allow(ActionGuard.Surface.DIALOG, btn.text)) return;
+            treasureDismissTries = 0;
+            host.gestures().tap(new Bounds(btn.left, btn.top, btn.right, btn.bottom), 80, NO_OP);
+            treasureBusyUntil = now + 2000;
+            log("森林：已关闭寻宝抽奖结果弹窗（OCR）。");
+        }
+    }
+
+    private static TextBlock findOcrBlock(List<TextBlock> boxes, String text) {
+        for (TextBlock block : boxes) {
+            if (block != null && block.hasBounds() && block.text.contains(text)) return block;
+        }
+        return null;
+    }
+
+    private static int ocrChances(List<TextBlock> boxes) {
+        int chances = 0;
+        for (TextBlock block : boxes) {
+            if (block == null || block.text == null) continue;
+            Matcher matcher = TREASURE_CHANCES.matcher(block.text);
+            if (!matcher.find()) continue;
+            try {
+                chances = Math.max(chances, Integer.parseInt(matcher.group(1)));
+            } catch (NumberFormatException ignored) {
+                // 识别失败按 0 处理。
+            }
+        }
+        return chances;
+    }
+
     /** 奖励弹窗可能在列表顶部或滚动后：标题或任意任务行按钮出现即认定为奖励页。 */
     private static boolean isRewardPage(UiTree tree) {
         // 「我的活力值」在森林主页同样存在，不能作为奖励页标记
@@ -847,10 +1466,14 @@ public final class ForestTaskRunner implements TaskRunner {
     private void stop(String reason) {
         if (finished) return;
         finished = true;
+        // 「请手动」类收尾说明页面停在不确定状态，串联队列不再自动接续。
+        chainBlocked = reason != null && reason.contains("请手动");
         Diag.i(TAG, "finish run=" + (host.now() - startedAtMs) / 1000 + "s " + reason);
         log(reason);
         host.stopForeground();
     }
+
+    @Override public boolean chainShouldContinue() { return !chainBlocked; }
 
     private boolean allow(ActionGuard.Surface surface, String label) {
         return gate != null && gate.allow(surface, label);

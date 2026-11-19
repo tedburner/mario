@@ -81,6 +81,13 @@ public class ForestTaskParserTest {
         assertEquals(15, market.browseSeconds());
     }
 
+    /** 行内没有时长文案时默认 10s（2026-11-17 实测 22/22 全走默认，15s 拖爆 deadline）。 */
+    @Test public void defaultsToTenSecondsWhenRowHasNoTiming() {
+        ForestTask task = new ForestTask("逛支付宝会员中心", "逛一逛", "+30g", "", 0,
+                0, 0, 0, 0, ForestTask.Kind.BROWSE, ForestTaskPolicy.ALIPAY, false, "");
+        assertEquals(10, task.browseSeconds());
+    }
+
     @Test public void ignoresZeroBoundsRows() {
         List<ForestTask> tasks = ForestTaskParser.parse(rewardPage(), 1200, 2620, INSTALLED);
         for (ForestTask task : tasks) {
@@ -182,16 +189,18 @@ public class ForestTaskParserTest {
         assertEquals("逛森林集市得能量", tasks.get(0).title);
     }
 
-    /** 真机 2026-11-10：玩一玩森林乐消消 的按钮是「去抽奖」，之前整行解析不出来，所以从来不去抽奖。 */
-    @Test public void parsesDrawRowAsDrawKind() {
+    /** 真机 2026-11-19：任务行「去森林寻宝抽1t能量」含头部词「森林寻宝」，曾被整行误杀。 */
+    @Test public void parsesTreasureHuntRowContainingHeaderWord() {
         List<UiNode> nodes = new ArrayList<>();
         nodes.add(n(0, "任务进度:", 71, 930, 250, 990));
-        nodes.add(n(1, "玩一玩森林乐消消", 282, 1748, 799, 1829));
-        nodes.add(n(2, "去抽奖", 838, 1748, 1101, 1829));
-        nodes.add(n(3, "x1", 916, 1732, 1108, 1774));
+        nodes.add(n(1, "去森林寻宝抽1t能量", 282, 1500, 799, 1580));
+        nodes.add(n(2, "去参与", 838, 1500, 1101, 1580));
+        nodes.add(n(3, "+10g", 916, 1484, 1108, 1528));
         List<ForestTask> tasks = ForestTaskParser.parse(nodes, 1200, 2670, INSTALLED);
         assertEquals(1, tasks.size());
-        assertEquals(ForestTask.Kind.DRAW, tasks.get(0).kind);
-        assertTrue(tasks.get(0).actionable());
+        assertEquals("去森林寻宝抽1t能量", tasks.get(0).title);
+        assertEquals("去参与", tasks.get(0).cta);
+        assertEquals(ForestTask.Kind.BROWSE, tasks.get(0).kind);
+        assertEquals(ForestTaskPolicy.ALIPAY, tasks.get(0).targetPackage);
     }
 }
