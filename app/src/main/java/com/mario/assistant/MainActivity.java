@@ -96,8 +96,8 @@ public final class MainActivity extends Activity {
                 "未找到支付宝。", "com.eg.android.AlipayGphone", false, TaskService::arm);
         View energyCell = gridRunButton("森林能量", Sprites.leaf(), MarioTheme.PIPE,
                 "未找到支付宝。", "com.eg.android.AlipayGphone", false, TaskService::armEnergy);
-        root.addView(gridRow(checkinCell, readingCell, forestCell));
-        root.addView(stacked(gridRow(energyCell), 10, 10));
+        root.addView(gridRow(checkinCell, readingCell, energyCell));
+        root.addView(stacked(gridRow(forestCell), 10, 10));
         TextView stop = MarioTheme.button(this, "停止运行",
                 PixelArt.sprite(this, Sprites.bomb(), 24), MarioTheme.DANGER, 17, 54);
         stop.setOnClickListener(v -> {
