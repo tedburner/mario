@@ -214,6 +214,21 @@ public class WelfareTaskLocatorTest {
         assertNull(WelfareTaskLocator.signinClaimButton(Collections.emptyList(), 1200));
     }
 
+    @Test public void detectsPendingMilestoneBySubtitle() {
+        // 真机 2026-11-20 14:48：上滑过头后“完成3个广告任务得奖励”标题被顶栏盖住，
+        // 只剩副标题“+10点章节卡再完成3次可得”（领取后消失），据此先回扫补做。
+        assertTrue(WelfareTaskLocator.milestonePending(Arrays.asList(
+                new TextBlock("+10点章节卡再完成3次可得", 81, 282, 500, 320),
+                new TextBlock("完成1个广告任务得奖励", 81, 403, 460, 440))));
+        assertTrue(WelfareTaskLocator.milestonePending(Collections.singletonList(
+                new TextBlock("再完成 3 次 可得", 81, 282, 500, 320))));
+        // 已完成/无关页面不触发回扫。
+        assertFalse(WelfareTaskLocator.milestonePending(Arrays.asList(
+                new TextBlock("已领取", 947, 1418, 1057, 1456),
+                new TextBlock("去携程签到领积分", 81, 1383, 465, 1429))));
+        assertFalse(WelfareTaskLocator.milestonePending(Collections.emptyList()));
+    }
+
     @Test public void describeListsRecognizedRowTitlesButtonsAndBottomZone() {
         String summary = WelfareTaskLocator.describe(Arrays.asList(
                 new TextBlock("激励任务", 50, 500, 180, 550),

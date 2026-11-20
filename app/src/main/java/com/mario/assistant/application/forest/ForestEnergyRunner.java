@@ -291,7 +291,9 @@ public final class ForestEnergyRunner implements TaskRunner {
             if (EnergyPagePolicy.reachedFriendBudget(visitedFriends + 1)) {
                 stage = 4;
                 stageAt = host.now();
-                log("森林能量：已走完 " + EnergyPagePolicy.MAX_FRIENDS + " 位好友，准备收尾。");
+                // 预算只在遇到「没有一键收」的好友时检查，实际可能已走过更多位；日志按真实计数写。
+                log("森林能量：已走完 " + visitedFriends + " 位好友（预算 "
+                        + EnergyPagePolicy.MAX_FRIENDS + "），准备收尾。");
                 return;
             }
             swipeUp();

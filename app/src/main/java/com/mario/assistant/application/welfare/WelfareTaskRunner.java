@@ -54,6 +54,9 @@ public final class WelfareTaskRunner implements TaskRunner {
     private int emptyScans;
     private int scrollAttempts;
     private boolean scrollReversed;
+    /** 上滑过头、里程碑行标题被顶栏盖住时的回扫次数；每次试运行最多 2 次，防止来回滑动。 */
+    private int upperScanTries;
+    private static final int MAX_UPPER_SCANS = 2;
     private int claimedFrames;
     private long unlockDeadline;
     private int unlockAttempts;
@@ -156,6 +159,7 @@ public final class WelfareTaskRunner implements TaskRunner {
         startedAtMs = host.now();
         adEntries = 0;
         popupCloses = 0;
+        upperScanTries = 0;
         adFlow = new AdFlow();
         // 串联运行时上一个任务可能把前台留在其他应用：不在起点就自行唤起
         // （单独运行时主界面已启动起点，这里只是把已有任务栈唤到前台，不改页面）。
@@ -460,6 +464,12 @@ public final class WelfareTaskRunner implements TaskRunner {
                 }
                 if (++signinFrames >= 2) {
                     if (currentSignin) {
+                        // 携程行处理完不等于全部做完：上滑过头时「完成3个广告任务得奖励」只剩副标题，
+                        // 先回扫上方补做，再收尾。
+                        if (reverseScanForPendingMilestone(boxes, imageWidth, imageHeight, "携程签到已处理，")) {
+                            nextTask("「去携程签到领积分」已处理；");
+                            return;
+                        }
                         finish(signinClaimTaps > 0
                                 ? "「去携程签到领积分」奖励已领取，全部任务结束；请在福利中心核对。"
                                 : "「去携程签到领积分」已完成，但页面上没有出现「领奖励」，请在福利中心手动确认。");
@@ -495,6 +505,8 @@ public final class WelfareTaskRunner implements TaskRunner {
             priorReadingTarget = null;
             Diag.i(TAG, WelfareTaskLocator.describe(boxes, imageHeight));
             logSigninGeometry(boxes);
+            boolean onWelfarePage = navigationAttempted || WelfareTaskLocator.isWelfareCenter(boxes);
+            if (onWelfarePage && reverseScanForPendingMilestone(boxes, imageWidth, imageHeight, "任务行未匹配，")) return;
             if (WelfareTaskLocator.claimedSignin(boxes, imageWidth)) {
                 // 携程行已是“已领取”，其余任务行也不可点：本轮任务全部完成，不必再滑动到超时。
                 if (++claimedFrames >= 2) {
@@ -503,7 +515,6 @@ public final class WelfareTaskRunner implements TaskRunner {
                 return;
             }
             claimedFrames = 0;
-            boolean onWelfarePage = navigationAttempted || WelfareTaskLocator.isWelfareCenter(boxes);
             if (onWelfarePage) {
                 emptyScans++;
                 if (emptyScans >= 2 && scrollAttempts < 6) {
@@ -525,6 +536,8 @@ public final class WelfareTaskRunner implements TaskRunner {
         }
         emptyScans = 0;
         claimedFrames = 0;
+        // 优先级更高的「完成3个广告任务得奖励」若只剩副标题可见，先回扫补出来，别直接做携程签到。
+        if (row.signin && reverseScanForPendingMilestone(boxes, imageWidth, imageHeight, "优先处理里程碑任务，")) return;
         if (priorWidth != imageWidth || priorHeight != imageHeight
                 || !VisualTargetGuard.stable(priorReadingTarget, row.button, imageWidth, imageHeight)
                 || host.now() - capturedAt > 5000) {
@@ -756,6 +769,25 @@ public final class WelfareTaskRunner implements TaskRunner {
             host.gestures().swipe(width / 2, height / 4, width / 2, height * 3 / 4, 300,
                     swipeCallback("swipe back", "已向下滑动福利中心，回扫上方任务行。"));
         }
+    }
+
+    /**
+     * 上滑过头时「完成3个广告任务得奖励」的标题会藏到顶栏下面，只剩副标题「…再完成3次可得」；
+     * 此时先向下回扫把整行露出来，而不是按优先级直接跳去做携程签到。
+     * 返回 true 表示本帧已发起回扫，调用方应直接 return。
+     */
+    private boolean reverseScanForPendingMilestone(List<TextBlock> boxes, int width, int height, String reason) {
+        if (upperScanTries >= MAX_UPPER_SCANS) return false;
+        if (!WelfareTaskLocator.milestonePending(boxes)) return false;
+        upperScanTries++;
+        emptyScans = 0;
+        claimedFrames = 0;
+        scrollAttempts = 0;
+        scrollReversed = false;
+        log(reason + "「完成3个广告任务得奖励」仍未完成，已回扫上方任务行（第 "
+                + upperScanTries + "/" + MAX_UPPER_SCANS + " 次）。");
+        swipe(width, height, false);
+        return true;
     }
 
     /** 广告轮播左滑：手指从右向左，取视频区域中部，避开顶部轮播面板与底部广告卡片。 */

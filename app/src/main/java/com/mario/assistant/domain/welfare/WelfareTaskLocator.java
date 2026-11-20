@@ -93,6 +93,20 @@ public final class WelfareTaskLocator {
         if (text.length() > 6 || !text.startsWith("领")) return null;
         return button;
     }
+    /**
+     * 「完成3个广告任务得奖励」是否仍未完成：该行未完成时副标题为「+10点章节卡再完成3次可得」，
+     * 领取后副标题消失。真机 2026-11-20 14:48 福利中心上滑过头，该行标题被顶栏盖住、
+     * find() 取不到整行，只认标题会导致直接跳做携程签到、里程碑整轮漏做。
+     */
+    public static boolean milestonePending(List<TextBlock> boxes) {
+        if (boxes == null) return false;
+        for (TextBlock box : boxes) {
+            if (box == null || box.text == null) continue;
+            String text = box.text.replace(" ", "");
+            if (text.contains("再完成") && text.contains("可得")) return true;
+        }
+        return false;
+    }
     /** 签到行的按钮：标题右侧、纵向同一条带内的唯一短标签（不接受含“携程”的文案）。 */
     private static TextBlock soleSigninButton(List<TextBlock> boxes, TextBlock title, int width) {
         if (title.left < 0 || title.right >= width || title.top >= title.bottom) return null;

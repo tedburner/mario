@@ -90,15 +90,15 @@ public final class TaskService extends AccessibilityService implements RunHost {
         if (scanHandler == null || coordinator == null) { save("识别线程未就绪，请稍后重试。"); return; }
         scanHandler.post(() -> coordinator.start(new DailyCheckinRunner()));
     }
-    /** 一键自动化：每日签到 → 起点任务 → 森林任务 → 森林能量，前一个收尾后自动接续。 */
+    /** 一键自动化：每日签到 → 起点任务 → 森林能量 → 森林任务，前一个收尾后自动接续。 */
     void armAutomation() {
         if (scanHandler == null || coordinator == null) { save("识别线程未就绪，请稍后重试。"); return; }
-        save("一键自动化：每日签到 → 起点任务 → 森林任务 → 森林能量。");
+        save("一键自动化：每日签到 → 起点任务 → 森林能量 → 森林任务。");
         scanHandler.post(() -> coordinator.startChain(
                 new DailyCheckinRunner(),
                 new WelfareTaskRunner(),
-                new ForestTaskRunner(ForestTaskRunner.Mode.NORMAL),
-                new ForestEnergyRunner()));
+                new ForestEnergyRunner(),
+                new ForestTaskRunner(ForestTaskRunner.Mode.NORMAL)));
     }
     void cancel() {
         if (scanHandler != null) scanHandler.post(() -> coordinator.stop("已停止。"));
