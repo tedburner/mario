@@ -45,6 +45,16 @@ public final class DailyCheckinRunner implements TaskRunner {
     private static final long WRAPUP_TIMEOUT_MS = 12000;
     private static final int MAX_WRAPUP_CLAIMS = 2;
     private static final int MAX_WRAPUP_DISMISSALS = 4;
+    /**
+     * 首页信息流型入口（RQrun「签到福利」）位置随日期变化，可能沉到首屏之外
+     * （真机 11-17/11-18 两日不在首屏漏签，11-19 恰好露出才成功）：
+     * 首屏没找到时等首页稳定后向下滚屏重扫。滚动前先给首页 10 秒加载，
+     * 避免入口正要渲染时被滚走；仅用于无弹窗、无标签兜底的 App——
+     * E充站入口固定在右上角，滚动只会把它推出屏幕。
+     */
+    private static final int MAX_ENTRY_SCROLLS = 2;
+    private static final long ENTRY_SCROLL_FIRST_WAIT_MS = 10000;
+    private static final long ENTRY_SCROLL_GAP_MS = 4000;
 
     private RunHost host;
     private RunToken token;
@@ -76,6 +86,11 @@ public final class DailyCheckinRunner implements TaskRunner {
     private int wrapupIdleFrames;
     /** 本 run 启动时刻：finish 行带 run=Ns，复盘不用再手推时间戳。 */
     private long startedAtMs;
+    /** 找入口阶段已向下滚动次数与上次滚动时刻（仅信息流型入口 App）。 */
+    private int entryScrolls;
+    private long entryScrollAt;
+    /** 打开应用超时后已重试次数。 */
+    private int launchRetries;
 
     @Override public String id() { return "checkin"; }
 
@@ -110,6 +125,17 @@ public final class DailyCheckinRunner implements TaskRunner {
         }
         if (phase == 0) {
             if (now - phaseAt >= LAUNCH_TIMEOUT_MS) {
+                // 冷启动偶发卡壳（真机 11-18 08:44：E充站/比亚迪同时 20 秒未到前台）：
+                // 重试一次干净的冷启动，仍不行才如实记「未能打开应用」。
+                if (launchRetries < 1) {
+                    launchRetries++;
+                    log("每日签到：「" + app.name + "」超时未到前台，重试打开（第 " + launchRetries + " 次）。");
+                    host.env().resetForeground();
+                    host.env().launch(app.packageName, true);
+                    phaseAt = now;
+                    appDeadline = Math.max(appDeadline, now + LAUNCH_TIMEOUT_MS);
+                    return;
+                }
                 recordUnsure("未能打开应用");
                 nextApp(now);
                 return;
@@ -160,6 +186,9 @@ public final class DailyCheckinRunner implements TaskRunner {
             dismissTaps = 0;
             lastTapAt = 0;
             priorTarget = null;
+            entryScrolls = 0;
+            entryScrollAt = 0;
+            launchRetries = 0;
             wrapup = false;
             wrapupClaims = 0;
             wrapupDismissals = 0;
@@ -237,6 +266,17 @@ public final class DailyCheckinRunner implements TaskRunner {
                 if (app.tab != null && popupWindowOver) {
                     entryStep = 1;
                     log("每日签到：「" + app.name + "」前往「" + app.tab + "」标签找签到入口。");
+                    return;
+                }
+                // 信息流型入口（RQrun）首屏没有：等首页稳定后向下滚屏重扫，而不是干等到超时。
+                if (!app.popupFirst && app.homeEntry != null && entryScrolls < MAX_ENTRY_SCROLLS
+                        && now - phaseAt >= ENTRY_SCROLL_FIRST_WAIT_MS
+                        && now - entryScrollAt >= ENTRY_SCROLL_GAP_MS) {
+                    entryScrolls++;
+                    entryScrollAt = now;
+                    swipeUp();
+                    log("每日签到：「" + app.name + "」首屏未找到「" + app.homeEntry
+                            + "」，已向下滚动重扫（第 " + entryScrolls + " 次）。");
                 }
                 return;
             }
@@ -414,6 +454,19 @@ public final class DailyCheckinRunner implements TaskRunner {
                 && VisualTargetGuard.stable(priorTarget, target, width, height)
                 && host.now() - capturedAt <= 5000;
     }
+
+    /** 找入口的滚屏：向下滚一屏露出信息流里的签到入口卡片。 */
+    private void swipeUp() {
+        int width = host.env().screenWidth();
+        int height = host.env().screenHeight();
+        host.gestures().swipe(width / 2, height * 3 / 4, width / 2, height / 4, 350, NO_OP);
+    }
+
+    private final Gestures.Callback NO_OP = new Gestures.Callback() {
+        @Override public void onCompleted() { }
+        @Override public void onCancelled() { }
+        @Override public void onRejected() { }
+    };
 
     private void tap(TextBlock box, String success, String failure) {
         final CheckinApp tapped = app;

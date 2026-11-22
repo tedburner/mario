@@ -34,6 +34,11 @@ public final class ForestTaskRunner implements TaskRunner {
     /** 里程碑最多点这么多次，防止按钮文案不变时死循环。 */
     private static final int MAX_MILESTONE_TAPS = 6;
     private static final long MILESTONE_SETTLE_MS = 2000;
+    /**
+     * 第三方 BACK 重试节奏：返回键亚秒即生效，6 秒是保守值。真机 11 天 60 次滞留统计，
+     * 第二次返回仍有 ~30% 成功率（不能省，只提速）：单次滞留少等 ~6 秒。
+     */
+    private static final long RETURN_BACK_RETRY_MS = 3000;
 
     private final Mode mode;
     private RunHost host;
@@ -578,7 +583,7 @@ public final class ForestTaskRunner implements TaskRunner {
             beginRecover(now);
             return;
         }
-        if (elapsed > 6000) {
+        if (elapsed > RETURN_BACK_RETRY_MS) {
             returnBacks++;
             if (host.env().back()) {
                 stageAt = now;
@@ -615,8 +620,8 @@ public final class ForestTaskRunner implements TaskRunner {
         boolean launched = host.env().launch(ALIPAY, false);
         log("forest recover pkg=" + pkg + " launched=" + launched);
         if (launched) {
-            log("森林：「" + (targetPackage != null ? targetPackage : pkg)
-                    + "」滞留过久，正在重新打开支付宝回到奖励页。");
+            // 打印实际滞留的包，而不是要回到的目标包（真机 11-22 08:02：卡在淘宝却报「支付宝」滞留）。
+            log("森林：「" + pkg + "」滞留过久，正在重新打开支付宝回到奖励页。");
         } else {
             stop("森林：无法重新打开支付宝，请手动进入奖励页。");
         }
