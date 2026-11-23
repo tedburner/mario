@@ -61,10 +61,13 @@ public class WelfareTaskLocatorTest {
         WelfareTaskLocator.Row row = WelfareTaskLocator.find(Arrays.asList(milestone, action), 1000);
         assertNotNull(row);
         assertEquals("完成3个广告任务得奖励", row.title);
-        // 范围外的“完成1个广告任务得奖励”不参与匹配。
-        TextBlock other = new TextBlock("完成1个广告任务得奖励", 50, 700, 280, 750);
-        assertNull(WelfareTaskLocator.find(Collections.singletonList(other), 1000));
-        assertNull(WelfareTaskLocator.find(Arrays.asList(other, action), 1000));
+        // 2026-11-23 起「完成1个广告任务得奖励」纳入范围（真机福利中心确有该行，纯广告任务）。
+        TextBlock oneAd = new TextBlock("完成1个广告任务得奖励", 50, 700, 280, 750);
+        assertEquals("完成1个广告任务得奖励",
+                WelfareTaskLocator.find(Arrays.asList(oneAd, action), 1000).title);
+        // 仍然排除非广告类任务行。
+        TextBlock outfit = new TextBlock("做任务得白泽宇航员装扮", 50, 700, 280, 750);
+        assertNull(WelfareTaskLocator.find(Arrays.asList(outfit, action), 1000));
     }
     @Test public void matchesLimitedTimeAdRowWithDecorationTolerance() {
         // 真机截图（点数页）：标题“【限时】广告·加点！”，装饰字符允许 OCR 缺失。
@@ -227,6 +230,76 @@ public class WelfareTaskLocatorTest {
                 new TextBlock("已领取", 947, 1418, 1057, 1456),
                 new TextBlock("去携程签到领积分", 81, 1383, 465, 1429))));
         assertFalse(WelfareTaskLocator.milestonePending(Collections.emptyList()));
+    }
+
+    /**
+     * 真机 2026-11-23 13:42 福利中心还有一行「完成1个广告任务得奖励」（副标题 +满10点3点订阅券），
+     * 此前 ROW_TITLES 只认 3 个的那行，这一行永远跳过。OCR 把「奖励」读成「大前」时也要能定位。
+     */
+    @Test public void matchesOneAdTaskRowIncludingOcrVariant() {
+        TextBlock title = new TextBlock("完成1个广告任务得奖励", 50, 1661, 300, 1700);
+        TextBlock action = new TextBlock("去完成", 800, 1665, 950, 1705);
+        assertEquals("完成1个广告任务得奖励",
+                WelfareTaskLocator.find(Arrays.asList(title, action), 1000).title);
+        TextBlock variant = new TextBlock("完成1个广告任务得大前", 50, 1661, 300, 1700);
+        TextBlock variantAction = new TextBlock("去完成", 800, 1665, 950, 1705);
+        assertEquals("OCR 变体也能定位",
+                "完成1个广告任务得奖励",
+                WelfareTaskLocator.find(Arrays.asList(variant, variantAction), 1000).title);
+        // 不能把「完成3个广告任务得奖励」抢走。
+        TextBlock three = new TextBlock("完成3个广告任务得奖励", 50, 1466, 300, 1505);
+        TextBlock threeAction = new TextBlock("去完成", 800, 1470, 950, 1510);
+        assertEquals("完成3个广告任务得奖励",
+                WelfareTaskLocator.find(Arrays.asList(three, threeAction), 1000).title);
+    }
+
+    /**
+     * 真机 2026-11-23 14:05 回归：滚动位置偏下时该行整行消失，被误判成「已完成」。
+     * 下面两组用例锁定「标题认不出也要能定位」和「能否宣布已完成」两个判据。
+     */
+    @Test public void locatesMilestoneRowBySubtitleWhenTitleIsUnreadable() {
+        // 标题被 OCR 打成乱码（真机出现过“完成3个广告任冬猩控励”），只有副标题可读。
+        TextBlock garbled = new TextBlock("完成3个广告任冬猩控励", 50, 1804, 600, 1850);
+        TextBlock subtitle = new TextBlock("+10点章节卡再完成3次可得", 50, 1878, 700, 1916);
+        TextBlock button = new TextBlock("去完成", 800, 1838, 950, 1890);
+        WelfareTaskLocator.Row row = WelfareTaskLocator.find(
+                Arrays.asList(garbled, subtitle, button), 1000);
+        assertNotNull("副标题是该行独有文案，标题废了也要能把整行还原出来", row);
+        assertEquals("完成3个广告任务得奖励", row.title);
+        assertEquals(button, row.button);
+        assertFalse(row.signin);
+    }
+
+    @Test public void subtitleWithoutActionButtonIsNotATaskRow() {
+        // 该行已领取（真机 1 广告行领完只剩副标题 + 无「去完成」），不能凭副标题硬造任务行。
+        TextBlock subtitle = new TextBlock("+10点章节卡再完成3次可得", 50, 1878, 700, 1916);
+        TextBlock claimed = new TextBlock("已领取", 800, 1838, 950, 1890);
+        assertNull(WelfareTaskLocator.find(Arrays.asList(subtitle, claimed), 1000));
+    }
+
+    @Test public void milestonePendingToleratesOcrCorruptionInSubtitle() {
+        // 「可得」被读成「可俱」时仍要判定为未完成，否则会直接跳去携程签到。
+        assertTrue(WelfareTaskLocator.milestonePending(
+                Collections.singletonList(new TextBlock("+10点章节卡再完成2次可俱", 50, 1878, 700, 1916))));
+        assertTrue(WelfareTaskLocator.milestonePending(
+                Collections.singletonList(new TextBlock("+10点章节卡再完成1次可得", 50, 1878, 700, 1916))));
+        assertFalse("订阅行是「再订阅」，不能误判成里程碑",
+                WelfareTaskLocator.milestonePending(
+                        Collections.singletonList(new TextBlock("+200积分再订阅2点可俱", 50, 1890, 700, 1928))));
+    }
+
+    @Test public void milestoneClearedNeedsPositiveEvidenceNotJustAbsence() {
+        TextBlock title = new TextBlock("完成3个广告任务得奖励", 50, 1804, 600, 1850);
+        TextBlock pendingSubtitle = new TextBlock("+10点章节卡再完成3次可得", 50, 1878, 700, 1916);
+        TextBlock claimedSubtitle = new TextBlock("+10点章节卡 已领取", 50, 1878, 700, 1916);
+        assertTrue("行在屏上且副标题不再提示再完成，才算真完成",
+                WelfareTaskLocator.milestoneCleared(Arrays.asList(title, claimedSubtitle)));
+        assertFalse("副标题还写着再完成3次",
+                WelfareTaskLocator.milestoneCleared(Arrays.asList(title, pendingSubtitle)));
+        assertFalse("只有副标题、没有标题 → 无法确认，必须让调用方回扫",
+                WelfareTaskLocator.milestoneCleared(Collections.singletonList(pendingSubtitle)));
+        assertFalse("空帧不是完成证据",
+                WelfareTaskLocator.milestoneCleared(Collections.<TextBlock>emptyList()));
     }
 
     @Test public void describeListsRecognizedRowTitlesButtonsAndBottomZone() {

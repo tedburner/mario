@@ -65,4 +65,30 @@ public class DialogDismissPolicyTest {
                 DialogDismissPolicy.Action.CLICK_NODE,
                 DialogDismissPolicy.decide(true, true, false));
     }
+
+    /**
+     * 真机 2026-11-23 13:31 的粘连帧：「10点章节卡惊喜礼(知道了)券@120,1706-788,1752」。
+     * 宽度 55.7% 超按钮带上限、框中心偏左 146px，文案与几何双双失败；但按钮行本身仍居中。
+     */
+    @Test public void gluedFullLineStillClosesByScreenCenter() {
+        String glued = "10点章节卡惊喜礼(知道了)券";
+        assertFalse("整行文案过不了白名单",
+                ActionGuard.evaluate(ActionGuard.Surface.DIALOG, glued).allowed);
+        TextBlock box = new TextBlock(glued, 120, 1706, 788, 1752);
+        assertFalse("框宽 668/1200 超出按钮带，几何校验也不通过",
+                AdCarouselPolicy.isCenteredButtonRow(box, 1200, 2670));
+
+        assertEquals(DialogDismissPolicy.Action.CLICK_EMBEDDED_CENTER,
+                DialogDismissPolicy.decide(true, false, false, false, true));
+        // 不含关闭文案（纯装饰）时仍不盲点。
+        assertEquals(DialogDismissPolicy.Action.STOP,
+                DialogDismissPolicy.decide(true, false, false, false, false));
+        // 节点与干净文案的优先级不变。
+        assertEquals(DialogDismissPolicy.Action.CLICK_NODE,
+                DialogDismissPolicy.decide(true, true, false, false, true));
+        assertEquals(DialogDismissPolicy.Action.CLICK_OCR,
+                DialogDismissPolicy.decide(true, false, true, false, true));
+        assertEquals(DialogDismissPolicy.Action.CLICK_CENTERED,
+                DialogDismissPolicy.decide(true, false, false, true, true));
+    }
 }
