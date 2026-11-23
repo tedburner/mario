@@ -1,6 +1,6 @@
 # 安卓任务助手 · 详细设计
 
-> 状态：详细设计 · 有效设计点已解决 5 / 5
+> 状态：详细设计 · 有效设计点已解决 8 / 8
 
 ## 操作与任务
 
@@ -35,7 +35,7 @@
 
 ### [x] 5. 验证
 - 回链：[hld #1](hld.md#hld-1)、[hld #2](hld.md#hld-2)、[hld #5](hld.md#hld-5)
-- 构建 APK 并检查基本逻辑；在小米 15 实测权限、每个页面的识别、任务结果、异常退出及调度。若无法连接真机，明确列出未验证项目和需要用户提供的页面信息，不宣称四类任务可用。
+- 构建 APK 并检查基本逻辑；在目标真机（小米 15）实测权限、每个页面的识别、任务结果、异常退出及调度。若无法连接真机，明确列出未验证项目和需要用户提供的页面信息，不宣称四类任务可用。
 
 ## 每日签到与一键自动化（2026-11-11）
 
@@ -68,7 +68,8 @@
   `detach` 不清（供 inspectReading 先停旧任务再 start）。前台服务由各运行器收尾时停止，
   链中下一个任务 activate 时重启，间隙仅在扫描线程同步代码内。
 - `TaskService.armCheckin` / `armAutomation`：后者串 DailyCheckinRunner → WelfareTaskRunner
-  → ForestTaskRunner(NORMAL) → ForestEnergyRunner。
+  → ForestEnergyRunner → ForestTaskRunner(NORMAL)。顺序于 2026-11-20 按用户要求调整过
+  （原为森林任务在森林能量之前），以 `TaskService.armAutomation` 的 `startChain` 实参顺序为准。
 - `WelfareTaskRunner.onStart` / `ForestTaskRunner.onStart(NORMAL)`：前台不是目标应用时
   `env.launch(pkg, false)` 自启动（单独运行时主界面已启动，等价于无害唤起）；启动失败
   （未安装）如实收尾，串联时让下一个任务接续。
@@ -78,7 +79,9 @@
 
 ### [x] 8. 验证状态
 - 单测：CheckinPolicyTest（匹配/几何带/歧义/完成标记/图标前缀/「今天」格/注册表）、ActionGuardTest 新增 CHECKIN 场景；
-  全量 144 项通过，assembleDebug 通过（2026-11-11）。
+  全量 155 项通过，assembleDebug 通过（2026-11-23；较 2026-11-11 的 144 项，后续随起点适配持续新增）。
+- 起点任务链在 2026-11-12 ~ 11-23 之间反复适配（广告结束页关闭、弹窗关闭策略、任务行预算、里程碑兜底定位）。
+  这些判定的现行口径以 README「起点读书 · 福利中心」一节为准，此处不重复维护第二份。
 - 已真机验证（2026-11-11 小米 15 / Android 16 / HyperOS）：
   1. 包名与安装状态：cn.runningquotient.rq、cn.charge（E充站）、com.byd.aeri.caranywhere 均在装；com.sgcc.evs.echarge 未安装；
   2. RQrun：首页「签到福利」→ 签到页「签到成功」，签到完成；
