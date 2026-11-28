@@ -8,6 +8,7 @@ import com.mario.assistant.application.TaskRunner;
 import com.mario.assistant.domain.forest.ForestMilestone;
 import com.mario.assistant.domain.forest.ForestTask;
 import com.mario.assistant.domain.forest.ForestTaskParser;
+import com.mario.assistant.domain.forest.ForestTaskPolicy;
 import com.mario.assistant.domain.forest.ForestTaskProgress;
 import com.mario.assistant.domain.model.Bounds;
 import com.mario.assistant.domain.model.TextBlock;
@@ -16,6 +17,8 @@ import com.mario.assistant.domain.safety.ActionGuard;
 import com.mario.assistant.infrastructure.a11y.UiTree;
 import com.mario.assistant.infrastructure.system.DeviceEnvironment;
 import com.mario.assistant.infrastructure.ui.Diag;
+import java.util.ArrayList;
+import java.util.Collections;
 import java.util.List;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
@@ -98,10 +101,19 @@ public final class ForestTaskRunner implements TaskRunner {
     private int treasureClaimTaps;
     private int treasureBrowseTaps;
     private int treasureDrawTaps;
+    private int treasureExchangeTaps;
+    private int treasureTabTaps;
+    private int treasureTabSeekSwipes;
+    private int treasureTabOcrTries;
+    private int treasureMarketTaps;
+    /** 轻任务（签到/兑换/领取/抽奖）先跨池做完再逛市集；只切一次，防在两池间打转。 */
+    private boolean treasureCheapSwitched;
     private int treasureOcrTries;
     private long treasureOcrAt;
     /** 浏览页的「已完成 可领奖励」角标点过一次就不再点。 */
     private boolean treasureBrowseClaim;
+    /** 最近一次奖励页扫描解析出的任务行：超时收尾时列出「没轮到」的行，用户不用再猜。 */
+    private List<ForestTask> lastTasks = Collections.emptyList();
     private int treasureTopSwipes;
     private long treasureTopSwipeAt;
     private long treasureScanAt;
@@ -111,6 +123,7 @@ public final class ForestTaskRunner implements TaskRunner {
     private static final int OCR_DRAW = 1;
     private static final int OCR_DISMISS = 2;
     private static final int OCR_BROWSE_CLAIM = 3;
+    private static final int OCR_TAB = 4;
     private static final int OCR_BROWSE_SCAN = 4;
     private int treasureCloseTaps;
     private int treasureBackTaps;
@@ -123,12 +136,26 @@ public final class ForestTaskRunner implements TaskRunner {
     private int treasureIdleTicks;
     private boolean treasureDiagOnce;
     private static final int MAX_TREASURE_CLAIMS = 4;
-    private static final int MAX_TREASURE_BROWSES = 4;
+    private static final int MAX_TREASURE_BROWSES = 6;
     private static final int MAX_TREASURE_DRAWS = 6;
+    /** 「消耗活力值兑抽奖机会」每轮 run 最多兑 2 次（用户确认的兑换额度，防超花活力值）。 */
+    private static final int MAX_TREASURE_EXCHANGES = 2;
+    /** 抽奖页左右两个「主题装扮」奖池：当前池任务做完后切到另一个池各做一轮。 */
+    private static final int MAX_TREASURE_TAB_SWITCHES = 2;
+    /**
+     * 市集「去逛逛」每轮 run 最多点 3 次：真机 11-28 实测 (0/2) 计数有延迟，
+     * 第 2 次访问后行仍显示可点、第 3 次才记数；不设上限会在单池上无限循环
+     * （每次市集浏览含 90s 停留 + 小游戏处理，实测 2~3 分钟一轮），把另一个池饿死。
+     */
+    private static final int MAX_TREASURE_MARKET_TAPS = 3;
     private static final int MAX_TREASURE_CLOSES = 4;
     /** WebView 抓树偶发卡死 20~35 秒，浏览页要留够解冻后继续滑动的时间。 */
     private static final long TREASURE_BROWSE_WAIT_MS = 90000;
-    private static final long TREASURE_DEADLINE_MS = 7 * 60 * 1000;
+    /**
+     * 真机 11-28：单池内一次市集浏览（90s 停留 + 滑动 + 小游戏 + 领取）实测约 2~3 分钟，
+     * 7 分钟只够一个奖池；两个奖池各做一轮（签到/兑换/市集×2/30s 游戏）需要 ~10 分钟。
+     */
+    private static final long TREASURE_DEADLINE_MS = 10 * 60 * 1000;
     private static final Pattern TREASURE_CHANCES = Pattern.compile("还有\\s*(\\d+)\\s*次机会");
     private static final Pattern BLANKS = Pattern.compile("[\\s\\u00a0\\u2000-\\u200a\\u3000]");
     private String lastSignature;
@@ -176,7 +203,7 @@ public final class ForestTaskRunner implements TaskRunner {
         }
         if (mode == Mode.DEBUG_TREASURE) {
             taskTitle = "(调试寻宝)";
-            deadline = now + 5 * 60 * 1000;
+            deadline = now + TREASURE_DEADLINE_MS; // 两池各做一轮需要 ~10 分钟，5 分钟会中途被掐
             enterTreasure(now);
             return;
         }
@@ -198,7 +225,7 @@ public final class ForestTaskRunner implements TaskRunner {
     @Override public void onTick(long now) {
         if (finished || !token.isCurrent()) return;
         if (now >= deadline) {
-            stop("森林任务超时停止；" + progress.summary() + "。");
+            stop("森林任务超时停止；" + progress.summary() + unattemptedSummary() + "。");
             return;
         }
         try {
@@ -216,6 +243,27 @@ public final class ForestTaskRunner implements TaskRunner {
 
     @Override public void onStop() {
         finished = true;
+    }
+
+    /**
+     * 超时收尾时列出「没轮到」的可执行行：{@link ForestTaskProgress#summary()} 只覆盖
+     * 试过的行（完成/未确认），预算耗尽时列表下方的行从未被点击——真机 11-28 09:11
+     * 超时只报「完成 14 项」，用户在奖励页看到 6 行挂着不知道是不是漏做，得靠人工对账。
+     * 只统计最后一次扫描视口内的行，视口外的行本来就看不见，如实不列。
+     */
+    private String unattemptedSummary() {
+        List<String> pending = new ArrayList<>();
+        for (ForestTask task : lastTasks) {
+            if (task.actionable() && !progress.isSettled(task.title)) pending.add(task.title);
+        }
+        if (pending.isEmpty()) return "";
+        StringBuilder sb = new StringBuilder("；未轮到 ").append(pending.size()).append(" 项：");
+        for (int i = 0; i < pending.size() && i < 3; i++) {
+            if (i > 0) sb.append('、');
+            sb.append(pending.get(i));
+        }
+        if (pending.size() > 3) sb.append(" 等");
+        return sb.toString();
     }
 
     /** 奖励页：每轮重新解析任务行，动态选择下一个可执行任务；完成一个再回来重新解析。 */
@@ -260,6 +308,7 @@ public final class ForestTaskRunner implements TaskRunner {
         if (claimMilestone(tree, now)) return;
         List<ForestTask> tasks = ForestTaskParser.parse(tree.nodes, tree.width, tree.height,
                 host.env()::isInstalled);
+        lastTasks = tasks;
         log("forest tasks=" + ForestTaskParser.describe(tasks));
         // 之前判过「浏览后仍可点」或「行已消失」的任务，一旦行上出现领取/抽奖入口，就该重新做一次
         for (ForestTask task : tasks) {
@@ -288,6 +337,11 @@ public final class ForestTaskRunner implements TaskRunner {
             } else if (same.kind == ForestTask.Kind.CLAIM || same.kind == ForestTask.Kind.DRAW) {
                 // 浏览任务完成后行会变成「立即领取」或「去抽奖」，这一跳是正常后续动作，不算失败
                 log("「" + title + "」已变成「" + same.cta + "」，继续执行后续动作。");
+            } else if (ForestTaskPolicy.isGameBrowse(title)
+                    && progress.recordBrowseFailure(title) <= ForestTaskProgress.MAX_BROWSE_FAILURES) {
+                // 真机 11-25：小游戏首次浏览（默认 10 秒）不够，行仍是「去看看」；
+                // 11-27 同一行第二次停留后变「去抽奖」完成。只多给一次，避免在永不完成的行上空转。
+                log("「" + title + "」浏览后仍可点击，再给一次浏览机会。");
             } else {
                 progress.markStuck(title);
                 log("「" + title + "」浏览后仍可点击，未确认完成，已跳过。");
@@ -890,6 +944,13 @@ public final class ForestTaskRunner implements TaskRunner {
         treasureClaimTaps = 0;
         treasureBrowseTaps = 0;
         treasureDrawTaps = 0;
+        treasureTabTaps = 0;
+        treasureTabSeekSwipes = 0;
+        treasureTabOcrTries = 0;
+        treasureMarketTaps = 0;
+        treasureCheapSwitched = false;
+        // treasureExchangeTaps 不在这里清零：奖励页可能反复重进寻宝页，
+        // 兑换预算按整轮 run 计（每次进页清零会在重进时超花活力值）。
         treasureOcrTries = 0;
         treasureOcrAt = 0;
         treasureVerifyAt = 0;
@@ -1001,10 +1062,12 @@ public final class ForestTaskRunner implements TaskRunner {
             return;
         }
 
-        // 抽奖结果弹窗右上角的 X 点不动，实测「做任务继续抽」可以关闭
+        // 抽奖结果弹窗右上角的 X 点不动，实测「做任务继续抽」可以关闭；
+        // 「确认兑换」是活力值兑换抽奖机会的确认弹窗（真机 11-28 取证）。
         UiNode popup = findTreasureNode(tree, "做任务继续抽");
         if (popup == null) popup = findTreasureNode(tree, "收下奖励");
         if (popup == null) popup = findTreasureNode(tree, "知道了");
+        if (popup == null) popup = findTreasureNode(tree, "确认兑换");
         if (popup != null && allow(ActionGuard.Surface.DIALOG, popup.text)) {
             treasureVerifyAt = 0;
             treasureOcrTries = 0;
@@ -1034,6 +1097,18 @@ public final class ForestTaskRunner implements TaskRunner {
             tapForest(claim.left, claim.top, claim.right, claim.bottom);
             treasureBusyUntil = now + 1800;
             log("森林：寻宝页已点击「领取」抽奖机会。");
+            return;
+        }
+
+        // 「消耗活力值得机会(0/2)」：点「去兑换」→「兑换确认」弹窗由上方弹窗分支确认（真机 11-28）。
+        UiNode exchange = findTreasureNode(tree, "去兑换");
+        if (exchange != null && treasureExchangeTaps < MAX_TREASURE_EXCHANGES
+                && allow(ActionGuard.Surface.TASK_ROW, "去兑换")) {
+            treasureExchangeTaps++;
+            treasureDrawPending++;
+            tapForest(exchange.left, exchange.top, exchange.right, exchange.bottom);
+            treasureBusyUntil = now + 1800;
+            log("森林：寻宝页已点击「去兑换」（第 " + treasureExchangeTaps + " 次），等待确认弹窗。");
             return;
         }
 
@@ -1071,10 +1146,19 @@ public final class ForestTaskRunner implements TaskRunner {
             }
         }
 
+        // 双奖池调度（真机 11-28）：先切池把两个池的轻任务（签到/兑换/领取/抽奖，各 ~1 分钟）
+        // 都做完，再按剩余预算逛市集——否则首池的市集浏览（2~3 分钟/轮）会把预算吃光，
+        // 另一个池的轻任务整轮漏做。轻任务切池只发生一次，之后由浏览耗尽后的切换分支回访。
+        if (!treasureCheapSwitched && treasureTabTaps < MAX_TREASURE_TAB_SWITCHES) {
+            if (trySwitchTreasureTab(tree, now, "轻任务收尾，切换到")) return;
+        }
+
         if (treasureBrowseTaps < MAX_TREASURE_BROWSES) {
-            UiNode browse = findTreasureBrowse(tree);
+            boolean marketExhausted = treasureMarketTaps >= MAX_TREASURE_MARKET_TAPS;
+            UiNode browse = findTreasureBrowse(tree, marketExhausted);
             if (browse != null && allow(ActionGuard.Surface.TASK_ROW, browse.text)) {
                 treasureBrowseTaps++;
+                if ("去逛逛".equals(browse.text)) treasureMarketTaps++;
                 treasureIdleTicks = 0;
                 treasureBrowsing = true;
                 treasureBrowseEndAt = now + TREASURE_BROWSE_WAIT_MS;
@@ -1101,7 +1185,72 @@ public final class ForestTaskRunner implements TaskRunner {
             }
         }
 
+        // 当前奖池可做任务做完：切到另一个「主题装扮」奖池再各做一轮
+        // （真机 11-28：页顶有左右两个奖池 tab，旧流程只处理默认激活的右池，左池的
+        // 签到/兑换/浏览/30s 游戏整轮漏做）。按 left 排序轮流点，两个池都会被访问到。
+        if (treasureTabTaps < MAX_TREASURE_TAB_SWITCHES) {
+            if (trySwitchTreasureTab(tree, now, "已切换到")) return;
+        }
+
         finishTreasure(now, "森林：寻宝页内可做任务已完成，正在返回奖励页。");
+    }
+
+    /**
+     * 切换奖池 tab（「XX主题装扮」）。三级兜底：无障碍树 → OCR 截图 → 滑回页顶。
+     * 返回 true 表示本帧已发起动作（点中/OCR 请求/寻位滑动），调用方应 return 等下一帧；
+     * 返回 false 表示预算耗尽或页面上确无第二个奖池，调用方按单池收尾。
+     */
+    private boolean trySwitchTreasureTab(UiTree tree, long now, String reason) {
+        UiNode tab = findTreasureTab(tree, treasureTabTaps);
+        if (tab != null) {
+            treasureTabTaps++;
+            treasureSignIns = 0; // 签到每池各一次，切换后要重新找
+            treasureIdleTicks = 0;
+            treasureCheapSwitched = true;
+            tapForest(tab.left, tab.top, tab.right, tab.bottom);
+            treasureBusyUntil = now + 2500;
+            log("森林：" + reason + "「" + tab.text + "」奖池，继续做该池任务。");
+            return true;
+        }
+        // tab 固定在页顶，视口常停在任务列表：先滑回顶部（真机 11-28 实测：任务列表处
+        // OCR 三帧都读不到 tab，必须先滚动），滑动冷却期间也不让浏览分支插队
+        if (treasureTabSeekSwipes < 2) {
+            if (now >= treasureTopSwipeAt) {
+                treasureTabSeekSwipes++;
+                treasureTopSwipeAt = now + 1500;
+                swipe(false);
+                log("森林：滑回抽奖页顶部寻找另一个奖池入口（第 " + treasureTabSeekSwipes + " 次）。");
+            }
+            treasureBusyUntil = now + 800;
+            return true;
+        }
+        // tab 胶囊是画布元素，树里读不到：页面到顶后用 OCR 截图定位。
+        // 截图要等上一次滑动 settle 完（真机 11-28：滑动后 1.2s 内截图会静默失败）。
+        if (treasureTabOcrTries < 4) {
+            if (now < treasureTopSwipeAt + 800 || now - treasureOcrAt < 4000) {
+                treasureBusyUntil = now + 1000; // 等 OCR 冷却
+                return true;
+            }
+            treasureTabOcrTries++;
+            requestTreasureOcr(OCR_TAB, now);
+            treasureBusyUntil = now + 1200;
+            return true;
+        }
+        return false;
+    }
+
+    /** 抽奖页顶部的奖池切换 tab（「XX主题装扮」）：按 left 排序后轮流点击。 */
+    private static UiNode findTreasureTab(UiTree tree, int tapIndex) {
+        List<UiNode> tabs = new ArrayList<>();
+        for (UiNode node : tree.nodes) {
+            if (node == null || !node.visible || !node.hasBounds() || !node.inViewport()) continue;
+            if (node.text == null || !node.text.contains("主题装扮")) continue;
+            if (node.bottom - node.top > tree.height * 12 / 100) continue;
+            tabs.add(node);
+        }
+        if (tabs.isEmpty()) return null;
+        tabs.sort((a, b) -> a.left - b.left);
+        return tabs.get(tapIndex % tabs.size());
     }
 
     /** 寻宝内的小游戏吞返回键：先找「关闭」节点，再按真机坐标 (0.875w, 0.075h) 兜底，最后才返回。 */
@@ -1222,8 +1371,12 @@ public final class ForestTaskRunner implements TaskRunner {
         return null;
     }
 
-    /** 只逛非【限时】的浏览行：限时行要升建筑/打怪，超出自动浏览的能力边界。 */
-    private static UiNode findTreasureBrowse(UiTree tree) {
+    /**
+     * 只逛非【限时】的浏览行：限时行要升建筑/打怪，超出自动浏览的能力边界。
+     * {@code skipMarket}：市集点击达到上限后跳过「去逛逛」，让 30s 游戏的「马上玩」有机会执行，
+     * 避免计数延迟的市集行把浏览预算全部吃掉（真机 11-28 (0/2) 行连点 3 次才记数）。
+     */
+    private static UiNode findTreasureBrowse(UiTree tree, boolean skipMarket) {
         int limitedTop = Integer.MAX_VALUE;
         for (UiNode node : tree.nodes) {
             if (node == null || !node.visible || node.text == null) continue;
@@ -1233,7 +1386,7 @@ public final class ForestTaskRunner implements TaskRunner {
         for (UiNode node : tree.nodes) {
             if (node == null || !node.visible || !node.hasBounds() || !node.inViewport()) continue;
             if (node.top >= limitedTop) continue;
-            if ("去逛逛".equals(node.text)) return node;
+            if (!skipMarket && "去逛逛".equals(node.text)) return node;
             if ("马上玩".equals(node.text) && fallback == null) fallback = node;
         }
         return fallback;
@@ -1272,7 +1425,7 @@ public final class ForestTaskRunner implements TaskRunner {
         host.ocr().recognize(boxes -> {
             if (finished || !token.isCurrent() || stage != 5) return;
             onTreasureOcr(purpose, boxes);
-        }, code -> { });
+        }, code -> log("森林：寻宝 OCR 截图失败 code=" + code + "（purpose=" + purpose + "），稍后重试。"));
     }
 
     private void onTreasureOcr(int purpose, List<TextBlock> boxes) {
@@ -1337,6 +1490,33 @@ public final class ForestTaskRunner implements TaskRunner {
             } else {
                 log("森林：市集页未见「可领奖励」，直接返回。");
             }
+            return;
+        }
+        if (purpose == OCR_TAB) {
+            // 「XX主题装扮」奖池 tab：树里读不到，按 OCR 框点击；两个 tab 按 left 排序轮流点
+            List<TextBlock> tabs = new ArrayList<>();
+            for (TextBlock block : boxes) {
+                if (block != null && block.hasBounds() && block.text != null
+                        && block.text.replace(" ", "").contains("主题装扮")) {
+                    tabs.add(block);
+                }
+            }
+            if (tabs.isEmpty()) {
+                log("森林：OCR 未读到奖池 tab，放弃切换（单池收尾）。");
+                return;
+            }
+            tabs.sort((a, b) -> a.left - b.left);
+            TextBlock tab = tabs.get(treasureTabTaps % tabs.size());
+            String tabText = tab.text.replace(" ", "");
+            if (!allow(ActionGuard.Surface.NAVIGATION, tabText)) return;
+            treasureTabTaps++;
+            treasureSignIns = 0; // 签到每池各一次，切换后要重新找
+            treasureIdleTicks = 0;
+            treasureCheapSwitched = true;
+            treasureTabOcrTries = 0;
+            host.gestures().tap(new Bounds(tab.left, tab.top, tab.right, tab.bottom), 80, NO_OP);
+            treasureBusyUntil = now + 2500;
+            log("森林：已切换到「" + tabText + "」奖池，继续做该池任务（OCR）。");
             return;
         }
         if (purpose == OCR_DISMISS) {

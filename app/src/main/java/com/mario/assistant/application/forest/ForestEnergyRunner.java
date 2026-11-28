@@ -211,7 +211,9 @@ public final class ForestEnergyRunner implements TaskRunner {
                 log("森林能量：已点击「找能量」，开始逐个好友收取。");
                 return;
             }
-            if (++entryTries >= 3) {
+            if (++entryTries >= 6) {
+                // 真机 11-23：主页标记都在但 OCR 连续三帧没读到「找能量」就放弃，整轮白跑；
+                // 入口行可能被活动浮层盖住或单帧误识，多等几帧再如实报失败。
                 stop("森林能量：找不到「找能量」入口，请确认支付宝停留在蚂蚁森林主页。");
             }
         }, null);

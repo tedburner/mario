@@ -21,8 +21,13 @@ adb shell am start -n com.mario.assistant/.MainActivity --activity-clear-task \
 前提：无障碍服务「Mario」已启用；并在系统设置里授予「后台弹出界面」与「显示悬浮窗」，
 否则广告页无法自动切回（logcat 表现为 `Abort background activity starts`）。
 
-目标机为小米 15（Android 16 / HyperOS）；`adb devices` 显示的型号 `24129PN74C` 就是它。
+目标机为小米 15（Android 17 / HyperOS）；`adb devices` 显示的型号 `24129PN74C` 就是它。
 文档里统一称「小米 15」，不要混用型号串。
+
+调试桥（仅 debug 包，`GestureBridge`）：单测某个子流程时用
+`adb shell am start -n com.mario.assistant/.MainActivity --es gesture_cmd t --es type treasure`
+（type 可选 arm / recover / collect / treasure / back / tap / swipe）。
+注意 `am broadcast -a com.mario.assistant.GESTURE` 在 HyperOS 上 receiver 收不到，必须走 activity intent。
 
 ## 取证
 

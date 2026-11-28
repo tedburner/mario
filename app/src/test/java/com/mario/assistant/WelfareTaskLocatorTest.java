@@ -315,4 +315,36 @@ public class WelfareTaskLocatorTest {
         assertTrue(summary.contains("去完成@905"));
         assertTrue(summary.contains("bottom=[我的@900,1800-960,1840]"));
     }
+
+    /**
+     * 真机 11-28 08:27 实测：标准 50% 交替回扫在「标题压屏底（按钮在屏外）」与
+     * 「整行顶出视口上方」两个稳定位置间跳变，三次回扫全落空。收尾闸门按锚点短距寻位。
+     */
+    @Test public void milestoneSeekUsesAnchorRowsToPickDirection() {
+        // 位置 A：激励任务卡可见、两个里程碑行都不可见 → 行折叠在视口下缘之下，短距上滑。
+        assertEquals(WelfareTaskLocator.SEEK_BELOW, WelfareTaskLocator.milestoneSeekDirection(
+                Collections.singletonList(new TextBlock("激励任务", 50, 700, 180, 750)), 2670));
+        // 位置 B：完成1个行可见 → 完成3个行紧贴其上、刚出视口上缘，短距下滑。
+        assertEquals(WelfareTaskLocator.SEEK_ABOVE, WelfareTaskLocator.milestoneSeekDirection(
+                Collections.singletonList(new TextBlock("完成1个广告任务得奖励", 50, 350, 300, 400)), 2670));
+        // 位置 A'：里程碑标题被读成乱码且压在屏幕底缘（真机「空成z个广生4タ但汐动」读不出），
+        // 但「3个广」片段还在 → 按钮在屏外，短距上滑露出按钮。
+        assertEquals(WelfareTaskLocator.SEEK_BELOW, WelfareTaskLocator.milestoneSeekDirection(
+                Collections.singletonList(new TextBlock("完成3个广告任务得奖励", 50, 2577, 592, 2605)), 2670));
+        // 行已在可点区域 → 不寻位，交给 find() 直接执行。
+        assertEquals(WelfareTaskLocator.SEEK_UNKNOWN, WelfareTaskLocator.milestoneSeekDirection(
+                Arrays.asList(new TextBlock("完成3个广告任务得奖励", 50, 1200, 300, 1250),
+                        new TextBlock("去完成", 800, 1205, 950, 1255)), 2670));
+        // 两个锚点都不在屏 → 交给常规交替回扫。
+        assertEquals(WelfareTaskLocator.SEEK_UNKNOWN, WelfareTaskLocator.milestoneSeekDirection(
+                Collections.<TextBlock>emptyList(), 2670));
+    }
+
+    /** 真机 11-28 08:27：滑到页底「参与活动领福利」区被误判「不在主页面」按返回退出福利中心。 */
+    @Test public void welfarePageBottomSectionsAreRecognized() {
+        assertTrue(WelfareTaskLocator.isWelfareCenter(Collections.singletonList(
+                new TextBlock("参与活动领福利", 78, 2418, 413, 2471))));
+        assertTrue(WelfareTaskLocator.isWelfareCenter(Collections.singletonList(
+                new TextBlock("阅读得积分", 88, 700, 300, 750))));
+    }
 }

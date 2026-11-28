@@ -12,7 +12,8 @@ public final class WelfareTaskLocator {
 
     /** 福利中心页的稳定文案锚点，覆盖顶部、任务区、限时福利和底部兑换区（页面滚到任何位置都能认出）。 */
     public static final String[] WELFARE_MARKERS = {"福利中心", "完成任务得奖励", "做任务领惊喜福利", "本周收益", "积分商城",
-            "限时福利", "携程签到", "添加小组件", "阅读得积分", "积分全额兑", "今日必抢", "补签卡", "仅正式会员可兑换", "更多积分好礼"};
+            "限时福利", "携程签到", "添加小组件", "阅读得积分", "参与活动领福利", "积分全额兑", "今日必抢", "补签卡",
+            "仅正式会员可兑换", "更多积分好礼"};
 
     public static boolean isWelfareCenter(List<TextBlock> boxes) {
         for (TextBlock box : boxes) {
@@ -130,6 +131,42 @@ public final class WelfareTaskLocator {
             found = box;
         }
         return found;
+    }
+
+    /** 里程碑行寻位：行在视口下方（短距上滑露出）。 */
+    public static final int SEEK_BELOW = 1;
+    /** 里程碑行寻位：行在视口上方（短距下滑露出）。 */
+    public static final int SEEK_ABOVE = -1;
+    /** 里程碑行寻位：锚点不可辨，交给常规交替回扫。 */
+    public static final int SEEK_UNKNOWN = 0;
+
+    /**
+     * 「完成3个广告任务得奖励」行相对当前视口的位置判定，供收尾回扫选择滑动距离。
+     *
+     * 真机 11-28 08:27 实测：标准 50% 屏高的交替回扫会在两个稳定位置间跳变——
+     * 里程碑标题压在屏幕底缘（按钮在屏外，y=2577/2670）或整行顶出视口上方，
+     * 永远凑不出「标题+按钮都在屏内」的可点击帧。必须按锚点短距寻位：
+     * 激励任务卡可见而两个里程碑行都不可见 → 行恰好折叠在视口下缘之下；
+     * 完成1个行可见 → 完成3个行紧贴其上、刚出视口上缘。
+     */
+    public static int milestoneSeekDirection(List<TextBlock> boxes, int height) {
+        boolean incentiveCard = false;
+        boolean oneAdRow = false;
+        TextBlock threeAdTitle = null;
+        for (TextBlock box : boxes) {
+            if (box == null || box.text == null) continue;
+            String text = box.text.replace(" ", "");
+            if (text.equals("激励任务")) incentiveCard = true;
+            if (text.contains("1个广") && text.contains("任务得")) oneAdRow = true;
+            if (text.contains("3个广") && text.contains("任务得")) threeAdTitle = box;
+        }
+        if (threeAdTitle != null) {
+            // 标题在屏但被压到底缘（按钮在屏外）→ 短距上滑露出按钮；已在可点位置则交给 find()
+            return height > 0 && threeAdTitle.top >= height * 80 / 100 ? SEEK_BELOW : SEEK_UNKNOWN;
+        }
+        if (incentiveCard && !oneAdRow) return SEEK_BELOW;
+        if (oneAdRow) return SEEK_ABOVE;
+        return SEEK_UNKNOWN;
     }
 
     /**

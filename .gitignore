@@ -6,3 +6,6 @@ app/build/
 .DS_Store
 .zcode/
 .workbuddy/
+
+# AGENTS.md 取证命令拉取的日志副本（设备上有原件）
+mario-logs*/

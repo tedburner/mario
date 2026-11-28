@@ -124,4 +124,40 @@ public class ForestTaskPolicyTest {
         assertEquals(ForestTask.Kind.SKIP, ForestTaskPolicy.decide(
                 "逛会场领红包", "去购买", "", INSTALLED).kind);
     }
+
+    /** 真机 11-22/23/26/27 四轮 0 完成：小荷包插件需手动加桌面插件，两种点击都不跳转。 */
+    @Test public void skipsPluginInstallRow() {
+        ForestTaskPolicy.Decision d = ForestTaskPolicy.decide(
+                "添加小荷包能量插件", "去完成", "", INSTALLED);
+        assertEquals(ForestTask.Kind.SKIP, d.kind);
+        assertEquals("标题命中跳过规则", d.reason);
+    }
+
+    /** 真机 11-25 失败 / 11-27 成功对照：玩一玩类行浏览后按钮没变时值得再浏览一次。 */
+    @Test public void gameBrowseRowsAreMarkedForSecondChance() {
+        assertTrue(ForestTaskPolicy.isGameBrowse("玩一玩青云诀之伏魔"));
+        assertTrue(ForestTaskPolicy.isGameBrowse("玩一玩几何王国"));
+        assertFalse(ForestTaskPolicy.isGameBrowse("逛一逛菜鸟裹酱"));
+        assertFalse(ForestTaskPolicy.isGameBrowse(null));
+    }
+
+    /**
+     * 真机 11-28：任务访问后按钮变「继续看 / 得更多」。寻宝行的「继续看」要多段任务重进；
+     * 其余行当日部分已完成，浏览只留「未确认」噪音（实测一轮 19 项），跳过。
+     */
+    @Test public void treasureContinueRowEntersAndOthersSkip() {
+        ForestTaskPolicy.Decision treasure = ForestTaskPolicy.decide(
+                "去森林寻宝抽1t能量", "继续看", "", INSTALLED);
+        assertEquals(ForestTask.Kind.BROWSE, treasure.kind);
+        assertEquals(ForestTaskPolicy.ALIPAY, treasure.targetPackage);
+
+        ForestTaskPolicy.Decision member = ForestTaskPolicy.decide(
+                "逛支付宝会员中心", "继续看", "", INSTALLED);
+        assertEquals(ForestTask.Kind.SKIP, member.kind);
+        assertTrue(member.reason.contains("当日任务已完成"));
+
+        ForestTaskPolicy.Decision game = ForestTaskPolicy.decide(
+                "玩一玩青云诀之伏魔", "得更多", "", INSTALLED);
+        assertEquals(ForestTask.Kind.SKIP, game.kind);
+    }
 }

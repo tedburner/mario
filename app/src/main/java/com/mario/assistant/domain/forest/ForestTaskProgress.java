@@ -17,15 +17,22 @@ import java.util.Set;
 public final class ForestTaskProgress {
     /** 领取点击后行仍可点，最多再试这么多次，超限按「未确认」收尾，不再空转。 */
     public static final int MAX_CLAIM_FAILURES = 2;
+    /**
+     * 浏览后行仍是「去看看」：玩一玩类小游戏允许再浏览这么多次。
+     * 真机 11-25 首次浏览（默认 10 秒）不够、按钮没变；11-27 同一行第二次停留后变「去抽奖」完成。
+     */
+    public static final int MAX_BROWSE_FAILURES = 1;
     private static final int SUMMARY_TITLES = 3;
 
     private final Set<String> done = new LinkedHashSet<>();
     private final Set<String> stuck = new LinkedHashSet<>();
     private final Map<String, Integer> claimFailures = new HashMap<>();
+    private final Map<String, Integer> browseFailures = new HashMap<>();
 
     public void markDone(String title) {
         if (isBlank(title)) return;
         stuck.remove(title);
+        browseFailures.remove(title);
         done.add(title);
     }
 
@@ -60,6 +67,7 @@ public final class ForestTaskProgress {
         if (isBlank(title)) return;
         stuck.remove(title);
         done.remove(title);
+        browseFailures.remove(title);
     }
 
     /** 已有结论的任务不再进入，避免在同一行上反复点击。 */
@@ -81,6 +89,22 @@ public final class ForestTaskProgress {
 
     public boolean canRetryClaim(String title) {
         return claimFailures(title) < MAX_CLAIM_FAILURES;
+    }
+
+    /** 记一次「浏览后行仍是『去看看』」，返回累计次数。 */
+    public int recordBrowseFailure(String title) {
+        if (isBlank(title)) return 0;
+        int next = browseFailures.getOrDefault(title, 0) + 1;
+        browseFailures.put(title, next);
+        return next;
+    }
+
+    public int browseFailures(String title) {
+        return title == null ? 0 : browseFailures.getOrDefault(title, 0);
+    }
+
+    public boolean canRetryBrowse(String title) {
+        return browseFailures(title) < MAX_BROWSE_FAILURES;
     }
 
     public int doneCount() {

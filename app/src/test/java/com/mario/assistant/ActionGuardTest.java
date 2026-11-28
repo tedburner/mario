@@ -48,10 +48,19 @@ public class ActionGuardTest {
         assertTrue(ActionGuard.evaluate(ActionGuard.Surface.DIALOG, "关闭").allowed);
         assertTrue(ActionGuard.evaluate(ActionGuard.Surface.DIALOG, "立即抽奖").allowed);
         assertTrue(ActionGuard.evaluate(ActionGuard.Surface.DIALOG, "收下奖励").allowed);
+        // 真机 11-28：寻宝页「消耗活力值兑抽奖机会」确认弹窗的确认按钮。
+        assertTrue(ActionGuard.evaluate(ActionGuard.Surface.DIALOG, "确认兑换").allowed);
         assertFalse(ActionGuard.evaluate(ActionGuard.Surface.DIALOG, "去购买").allowed);
         // 真机 OCR 把相邻文案并进按钮行时必须拒绝，交由节点精确文本兜底（见 DialogDismissPolicy）。
         assertFalse(ActionGuard.evaluate(ActionGuard.Surface.DIALOG, "10(0知道了8)8点").allowed);
         assertFalse(ActionGuard.evaluate(ActionGuard.Surface.DIALOG, "10t0知道了8)8点").allowed);
+    }
+
+    @Test public void taskRowAllowsTreasureExchangeEntry() {
+        // 寻宝页「消耗活力值得机会」行的入口按钮：兑换不在交易禁止清单（不下单/不支付，只花活力值换抽奖机会）。
+        assertTrue(ActionGuard.evaluate(ActionGuard.Surface.TASK_ROW, "去兑换").allowed);
+        assertTrue(ActionGuard.evaluate(ActionGuard.Surface.TASK_ROW, "去逛逛").allowed);
+        assertTrue(ActionGuard.evaluate(ActionGuard.Surface.TASK_ROW, "马上玩").allowed);
     }
 
     @Test public void claimSurfaceOnlyAllowsClaimLabels() {

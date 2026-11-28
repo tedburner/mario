@@ -67,6 +67,37 @@ public class ForestTaskProgressTest {
         assertEquals(0, progress.claimFailures("B"));
     }
 
+    /**
+     * 真机 11-25/11-27：玩一玩类小游戏首次浏览不够（按钮仍「去看看」），
+     * 台账允许再浏览一次；第二次仍不变就按「未确认」收尾。
+     */
+    @Test public void gameBrowseRetryStopsAtBudget() {
+        ForestTaskProgress progress = new ForestTaskProgress();
+        assertTrue(progress.canRetryBrowse("玩一玩青云诀之伏魔"));
+        assertEquals(1, progress.recordBrowseFailure("玩一玩青云诀之伏魔"));
+        assertFalse(progress.canRetryBrowse("玩一玩青云诀之伏魔"));
+        assertEquals(2, progress.recordBrowseFailure("玩一玩青云诀之伏魔"));
+        assertEquals(ForestTaskProgress.MAX_BROWSE_FAILURES, 1);
+    }
+
+    @Test public void browseFailureIsTrackedPerTitleAndClearedOnDone() {
+        ForestTaskProgress progress = new ForestTaskProgress();
+        progress.recordBrowseFailure("玩一玩青云诀之伏魔");
+        assertTrue(progress.canRetryBrowse("玩一玩几何王国"));
+        assertEquals(0, progress.browseFailures("玩一玩几何王国"));
+        progress.markDone("玩一玩青云诀之伏魔");
+        assertTrue(progress.canRetryBrowse("玩一玩青云诀之伏魔"));
+    }
+
+    /** 行变「去抽奖」重新纳入执行时，浏览失败计数一并清零，重开一轮浏览预算。 */
+    @Test public void clearedSettledResetsBrowseFailures() {
+        ForestTaskProgress progress = new ForestTaskProgress();
+        progress.recordBrowseFailure("玩一玩森林乐消消");
+        progress.clearSettled("玩一玩森林乐消消");
+        assertTrue(progress.canRetryBrowse("玩一玩森林乐消消"));
+        assertEquals(0, progress.browseFailures("玩一玩森林乐消消"));
+    }
+
     @Test public void summaryWithoutStuckOnlyCountsDone() {
         ForestTaskProgress progress = new ForestTaskProgress();
         progress.markDone("A");

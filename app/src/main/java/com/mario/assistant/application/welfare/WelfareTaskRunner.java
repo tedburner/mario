@@ -509,6 +509,18 @@ public final class WelfareTaskRunner implements TaskRunner {
                             nextTask("「去携程签到领积分」已处理；");
                             return;
                         }
+                        // 真机 11-28 08:09：里程碑行整行在视口上方（ subtitle 不可见）时，
+                        // reverseScanForPendingMilestone 两个当前帧检查都落空，直接宣布「全部任务结束」，
+                        // 「完成3个广告任务得奖励（再完成1次可得）」整行漏做。与 stage 0 的收尾闸门
+                        // 同纪律：回 stage 0 来回扫满次数、确认该行不在屏上才收尾；回扫途中该行
+                        // 一旦可见就会被 find() 按优先级执行。
+                        if (!milestoneChecked && milestoneCheckScans < MAX_MILESTONE_CHECK_SCANS) {
+                            stage = 0;
+                            navigationAttempted = true; // 已在福利中心页，跳过 tab 导航
+                            milestoneCheckSweep(boxes, imageWidth, imageHeight,
+                                    "收尾前核对「完成3个广告任务得奖励」：");
+                            return;
+                        }
                         finish(signinClaimTaps > 0
                                 ? "「去携程签到领积分」奖励已领取，全部任务结束；请在福利中心核对。"
                                 : "「去携程签到领积分」已完成，但页面上没有出现「领奖励」，请在福利中心手动确认。");
@@ -558,15 +570,8 @@ public final class WelfareTaskRunner implements TaskRunner {
                 // 旧逻辑因此 5 秒收尾并报「全部任务完成」，而那一行实际还挂着「再完成3次可得」。
                 // 没有正面证据就先来回扫一遍，扫不出来才收尾，且文案如实标注未确认。
                 if (!milestoneChecked && milestoneCheckScans < MAX_MILESTONE_CHECK_SCANS) {
-                    milestoneCheckScans++;
-                    emptyScans = 0;
-                    claimedFrames = 0;
-                    scrollAttempts = 0;
-                    boolean lookUp = milestoneCheckScans % 2 == 1;
-                    log("收尾前核对「完成3个广告任务得奖励」：当前帧未见该行，"
-                            + (lookUp ? "回扫上方" : "回扫下方") + "确认（第 " + milestoneCheckScans
-                            + "/" + MAX_MILESTONE_CHECK_SCANS + " 次）。");
-                    swipe(imageWidth, imageHeight, !lookUp);
+                    milestoneCheckSweep(boxes, imageWidth, imageHeight,
+                            "收尾前核对「完成3个广告任务得奖励」：");
                     return;
                 }
                 if (++claimedFrames >= 2) {
@@ -837,6 +842,51 @@ public final class WelfareTaskRunner implements TaskRunner {
             host.gestures().swipe(width / 2, height / 4, width / 2, height * 3 / 4, 300,
                     swipeCallback("swipe back", "已向下滑动福利中心，回扫上方任务行。"));
         }
+    }
+
+    /** 短距滑动（25% 屏高）：里程碑行寻位用，标准 50% 滑动会在两个扫描位置间跳过它。 */
+    private void shortSwipe(int width, int height, boolean revealBelow) {
+        if (width <= 0 || height <= 0) return;
+        int quarter = height / 4;
+        int mid = height / 2;
+        if (revealBelow) {
+            host.gestures().swipe(width / 2, mid + quarter / 2, width / 2, mid - quarter / 2, 300,
+                    swipeCallback("short swipe", "已短距上滑福利中心，露出里程碑整行。"));
+        } else {
+            host.gestures().swipe(width / 2, mid - quarter / 2, width / 2, mid + quarter / 2, 300,
+                    swipeCallback("short swipe back", "已短距下滑福利中心，露出里程碑整行。"));
+        }
+    }
+
+    /**
+     * 收尾前核对「完成3个广告任务得奖励」的一次寻位滑动。
+     *
+     * 真机 11-28 08:27-08:28 实测：标准 50% 交替回扫在两个稳定位置间跳变——
+     * 里程碑标题压在屏幕底缘（按钮在屏外，OCR 读成「空成z个广生4タ但汐动@2577」）或整行
+     * 顶出视口上方，三次回扫全部落空。按定位器的锚点判定短距寻位；锚点不可辨才退回
+     * 常规交替滑动。返回 true 表示已发起寻位滑动，调用方应 return 等下一帧。
+     */
+    private boolean milestoneCheckSweep(List<TextBlock> boxes, int imageWidth, int imageHeight, String reason) {
+        milestoneCheckScans++;
+        emptyScans = 0;
+        claimedFrames = 0;
+        scrollAttempts = 0;
+        int seek = WelfareTaskLocator.milestoneSeekDirection(boxes, imageHeight);
+        if (seek == WelfareTaskLocator.SEEK_BELOW) {
+            shortSwipe(imageWidth, imageHeight, true);
+            log(reason + "锚点在屏而里程碑行在视口下方，短距上滑露出整行（第 "
+                    + milestoneCheckScans + "/" + MAX_MILESTONE_CHECK_SCANS + " 次）。");
+        } else if (seek == WelfareTaskLocator.SEEK_ABOVE) {
+            shortSwipe(imageWidth, imageHeight, false);
+            log(reason + "「完成1个」行在屏而里程碑行在视口上方，短距下滑露出整行（第 "
+                    + milestoneCheckScans + "/" + MAX_MILESTONE_CHECK_SCANS + " 次）。");
+        } else {
+            boolean lookUp = milestoneCheckScans % 2 == 1;
+            swipe(imageWidth, imageHeight, !lookUp);
+            log(reason + "当前帧未见该行，" + (lookUp ? "回扫上方" : "回扫下方")
+                    + "确认（第 " + milestoneCheckScans + "/" + MAX_MILESTONE_CHECK_SCANS + " 次）。");
+        }
+        return true;
     }
 
     /**
@@ -1316,7 +1366,12 @@ public final class WelfareTaskRunner implements TaskRunner {
                 emptyScans = 0;
                 scrollAttempts = 0;
                 lastProgressAt = host.now();
-                log("广告页无法关闭，已清栈重启起点（第 " + freshRestarts + " 次）。");
+                // 真机 11-28 08:04：清栈重启后落在书架页，stage 4 只会干等福利中心出现，
+                // 直到超时报「未能确认返回后的奖励」。奖励结束页已证明奖励已发放，
+                // 直接回导航阶段重新进福利中心接着做剩余任务。
+                stage = 0;
+                returnedFrames = 0;
+                log("广告页无法关闭，已清栈重启起点（第 " + freshRestarts + " 次），重新导航福利中心。");
             } else {
                 stop("无法重新打开起点，请手动切换后重试。");
             }
